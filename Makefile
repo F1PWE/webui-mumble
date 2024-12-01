@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -I/usr/include/libwebsockets -I/usr/include/jansson
-LDFLAGS = -lwebsockets -lssl -lcrypto -ljansson
+LDFLAGS = -lwebsockets -lssl -lcrypto -ljansson -lpthread
 
 SERVER_SRC = src/server/main.c
 SERVER_OBJ = $(SERVER_SRC:.c=.o)

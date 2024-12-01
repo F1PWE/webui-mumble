@@ -9,11 +9,33 @@
 #include <openssl/err.h>
 #include <libwebsockets.h>
 #include <jansson.h>
+#include <arpa/inet.h>
+#include <pthread.h>
 
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
 #define WS_PORT 8080
-#define DEFAULT_HOST "localhost"
+#define DEFAULT_HOST "nimmerchat.xyz"
+#define MUMBLE_VERSION_1 0x10203  // Mumble 1.2.3
+#define MUMBLE_VERSION_2 0x10205  // Mumble 1.2.5
+
+// Mumble message types
+enum {
+    Version = 0,
+    Authenticate = 2,
+    Ping = 3,
+    UserState = 9,
+    UserRemove = 10,
+    ChannelState = 7,
+    TextMessage = 11
+};
+
+// Mumble protocol packet
+struct MumblePacket {
+    uint16_t type;
+    uint32_t length;
+    unsigned char *payload;
+};
 
 // Client connection state
 struct client_session {
@@ -25,6 +47,7 @@ struct client_session {
     size_t buf_len;             // Buffer length
     int authenticated;           // Authentication state
     char *server_host;          // Mumble server host
+    uint32_t session;           // Mumble session ID
 };
 
 // Global server state
@@ -159,7 +182,94 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
     return 0;
 }
 
-// Handle authentication with Mumble server
+// Create Mumble version packet
+static void send_version_packet(struct client_session *client) {
+    unsigned char packet[12];
+    uint16_t type = htons(Version);
+    uint32_t version = htonl(MUMBLE_VERSION_2);
+    
+    memcpy(packet, &type, 2);
+    memcpy(packet + 2, &version, 4);
+    memset(packet + 6, 0, 6);  // Release, OS, OS Version
+    
+    SSL_write(client->ssl, packet, sizeof(packet));
+}
+
+// Create Mumble authentication packet
+static void send_auth_packet(struct client_session *client) {
+    json_t *auth = json_object();
+    json_object_set_new(auth, "username", json_string(client->username));
+    json_object_set_new(auth, "password", json_string(""));  // No password for now
+    char *auth_str = json_dumps(auth, JSON_COMPACT);
+    
+    size_t payload_len = strlen(auth_str);
+    size_t packet_len = payload_len + 6;
+    unsigned char *packet = malloc(packet_len);
+    
+    uint16_t type = htons(Authenticate);
+    uint32_t length = htonl(payload_len);
+    
+    memcpy(packet, &type, 2);
+    memcpy(packet + 2, &length, 4);
+    memcpy(packet + 6, auth_str, payload_len);
+    
+    SSL_write(client->ssl, packet, packet_len);
+    
+    free(packet);
+    free(auth_str);
+    json_decref(auth);
+}
+
+// Handle Mumble server packets
+static void handle_mumble_packet(struct client_session *client, const unsigned char *data, size_t len) {
+    if (len < 6) return;  // Minimum packet size
+    
+    uint16_t type;
+    uint32_t length;
+    memcpy(&type, data, 2);
+    memcpy(&length, data + 2, 4);
+    type = ntohs(type);
+    length = ntohl(length);
+    
+    const unsigned char *payload = data + 6;
+    
+    switch (type) {
+        case Version:
+            // Server version received, send auth
+            send_auth_packet(client);
+            break;
+            
+        case UserState: {
+            // Parse user state and forward to WebSocket
+            json_t *user_state = json_object();
+            json_object_set_new(user_state, "type", json_string("user-state"));
+            json_object_set_new(user_state, "data", json_stringn((const char *)payload, length));
+            
+            char *state_str = json_dumps(user_state, JSON_COMPACT);
+            forward_to_websocket(client, (unsigned char *)state_str, strlen(state_str));
+            
+            free(state_str);
+            json_decref(user_state);
+            break;
+        }
+        
+        case ChannelState: {
+            // Parse channel state and forward to WebSocket
+            json_t *channel_state = json_object();
+            json_object_set_new(channel_state, "type", json_string("channel-state"));
+            json_object_set_new(channel_state, "data", json_stringn((const char *)payload, length));
+            
+            char *state_str = json_dumps(channel_state, JSON_COMPACT);
+            forward_to_websocket(client, (unsigned char *)state_str, strlen(state_str));
+            
+            free(state_str);
+            json_decref(channel_state);
+            break;
+        }
+    }
+}
+
+// Modified handle_authentication function
 static void handle_authentication(struct client_session *client) {
     // Connect to Mumble server first
     if (connect_to_mumble(client, client->server_host) != 0) {
@@ -167,16 +277,37 @@ static void handle_authentication(struct client_session *client) {
                         (unsigned char *)"Failed to connect to Mumble server", 31);
         return;
     }
-
+    
+    // Send version packet
+    send_version_packet(client);
+    
     client->authenticated = 1;
-    printf("User %s authenticated\n", client->username);
+    printf("User %s connected to Mumble server %s\n", client->username, client->server_host);
+    
+    // Start receiving data from Mumble server in a separate thread
+    pthread_t recv_thread;
+    pthread_create(&recv_thread, NULL, mumble_receive_thread, client);
+    pthread_detach(recv_thread);
+}
 
-    // Start receiving data from Mumble server
+// Mumble receive thread
+static void *mumble_receive_thread(void *arg) {
+    struct client_session *client = (struct client_session *)arg;
     unsigned char buffer[4096];
-    int bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
-    if (bytes > 0) {
-        forward_to_websocket(client, buffer, bytes);
+    
+    while (client->authenticated) {
+        int bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
+        if (bytes <= 0) {
+            if (bytes < 0) {
+                fprintf(stderr, "SSL_read error\n");
+            }
+            break;
+        }
+        
+        handle_mumble_packet(client, buffer, bytes);
     }
+    
+    return NULL;
 }
 
 // Handle incoming WebSocket messages
