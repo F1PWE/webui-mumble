@@ -8,7 +8,16 @@ fi
 
 # Install required packages
 apt-get update
-apt-get install -y nginx certbot python3-certbot-nginx libcap2-bin
+apt-get install -y nginx certbot python3-certbot-nginx libcap2-bin ssl-cert
+
+# Create mumble-web group if it doesn't exist
+if ! getent group mumble-web > /dev/null; then
+    groupadd mumble-web
+fi
+
+# Add www-data to necessary groups
+usermod -a -G ssl-cert www-data
+usermod -a -G mumble-web www-data
 
 # Create web directory and set permissions
 mkdir -p /var/www/webui-mumble/src/client
@@ -20,7 +29,7 @@ mkdir -p /opt/webui-mumble
 cp mumble-webui-server /opt/webui-mumble/
 cp mumble-webui.service /etc/systemd/system/
 chmod +x /opt/webui-mumble/mumble-webui-server
-chown -R www-data:www-data /opt/webui-mumble
+chown -R www-data:mumble-web /opt/webui-mumble
 
 # Set capabilities for port binding
 setcap 'cap_net_bind_service=+ep' /opt/webui-mumble/mumble-webui-server
@@ -37,7 +46,8 @@ nginx -t
 
 # Create log directory
 mkdir -p /var/log/mumble-webui
-chown www-data:www-data /var/log/mumble-webui
+chown www-data:mumble-web /var/log/mumble-webui
+chmod 775 /var/log/mumble-webui
 
 # Get SSL certificate and set permissions
 echo "Getting SSL certificate..."
@@ -45,10 +55,13 @@ certbot --nginx -d nimmerchat.xyz --non-interactive --agree-tos --email admin@ni
 
 if [ -d "/etc/letsencrypt/live/nimmerchat.xyz" ]; then
     echo "Setting SSL certificate permissions..."
-    chmod -R 755 /etc/letsencrypt/live/nimmerchat.xyz
-    chmod -R 755 /etc/letsencrypt/archive/nimmerchat.xyz
-    chown -R www-data:www-data /etc/letsencrypt/live/nimmerchat.xyz
-    chown -R www-data:www-data /etc/letsencrypt/archive/nimmerchat.xyz
+    # Add www-data to ssl-cert group (if not already done)
+    usermod -a -G ssl-cert www-data
+    # Set proper permissions
+    chmod -R 750 /etc/letsencrypt/live/nimmerchat.xyz
+    chmod -R 750 /etc/letsencrypt/archive/nimmerchat.xyz
+    chown -R root:ssl-cert /etc/letsencrypt/live/nimmerchat.xyz
+    chown -R root:ssl-cert /etc/letsencrypt/archive/nimmerchat.xyz
 else
     echo "Warning: SSL certificate directory not found!"
     echo "Please check if certbot created the certificates correctly."
@@ -71,4 +84,6 @@ systemctl is-active nginx
 echo -n "Checking WebUI status: "
 systemctl is-active mumble-webui
 echo -n "Checking SSL certificate: "
-[ -f "/etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem" ] && echo "OK" || echo "Missing!" 
+[ -f "/etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem" ] && echo "OK" || echo "Missing!"
+echo -n "Checking www-data groups: "
+groups www-data

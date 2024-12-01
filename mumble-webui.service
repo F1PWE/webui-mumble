@@ -6,7 +6,7 @@ Requires=mumble-server.service
 [Service]
 Type=simple
 User=www-data
-Group=www-data
+Group=mumble-web
 WorkingDirectory=/opt/webui-mumble
 ExecStart=/opt/webui-mumble/mumble-webui-server
 Restart=always
@@ -27,6 +27,9 @@ ReadOnlyDirectories=/etc/letsencrypt
 
 # SSL certificate access
 SupplementaryGroups=ssl-cert
+
+# Resource limits
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
