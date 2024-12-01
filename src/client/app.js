@@ -36,6 +36,8 @@ class MumbleClient {
 
     async connect() {
         try {
+            this.updateStatus('Requesting microphone access...');
+            
             // Get microphone access
             this.audioStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
@@ -46,22 +48,38 @@ class MumbleClient {
                 video: false
             });
 
-            // Create WebSocket connection to our server
+            this.updateStatus('Connecting to server...');
+
+            // Create WebSocket connection
             this.connection = new WebSocket(`wss://nimmerchat.xyz/mumble`);
-            this.connection.onopen = () => this.handleConnectionOpen();
-            this.connection.onclose = () => this.handleConnectionClose();
-            this.connection.onerror = (error) => this.handleConnectionError(error);
+            
+            this.connection.onopen = () => {
+                this.updateStatus('Connected to WebSocket, authenticating...');
+                // Send initial user data
+                this.connection.send(JSON.stringify({
+                    type: 'user-info',
+                    username: this.usernameInput.value || 'Guest'
+                }));
+            };
+
+            this.connection.onclose = () => {
+                this.updateStatus('Disconnected');
+                this.handleConnectionClose();
+            };
+
+            this.connection.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                this.updateStatus('Connection error');
+                this.handleConnectionError(error);
+            };
+
             this.connection.onmessage = (msg) => this.handleMessage(msg);
 
             // Initialize WebRTC
             this.initializeWebRTC();
-
-            this.updateStatus('Connected');
-            this.isConnected = true;
-            this.updateButtons();
         } catch (error) {
             console.error('Connection failed:', error);
-            this.updateStatus('Connection failed');
+            this.updateStatus('Connection failed: ' + error.message);
         }
     }
 
@@ -177,18 +195,23 @@ class MumbleClient {
 
     handleMessage(msg) {
         try {
+            console.log('Received message:', msg.data);
             const data = JSON.parse(msg.data);
             switch (data.type) {
                 case 'user-state':
+                    console.log('Updating user list:', data.users);
                     this.updateUserList(data.users);
                     break;
                 case 'channel-state':
+                    console.log('Updating channel list:', data.channels);
                     this.updateChannelList(data.channels);
                     break;
                 case 'error':
                     console.error('Server error:', data.message);
                     this.updateStatus('Error: ' + data.message);
                     break;
+                default:
+                    console.log('Unknown message type:', data.type);
             }
         } catch (error) {
             console.error('Error handling message:', error);

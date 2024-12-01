@@ -133,25 +133,34 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
 
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
-            debug_log("Client connected");
+            debug_log("WebSocket connection established");
             client->wsi = wsi;
             client->authenticated = 0;
             client->buf_len = 0;
             client->mumble_fd = -1;
             client->server_host = strdup(DEFAULT_HOST);
+            if (!client->server_host) {
+                debug_log("Failed to allocate server host");
+                return -1;
+            }
             break;
 
         case LWS_CALLBACK_RECEIVE:
-            debug_log("Received WebSocket message, length: %zu", len);
+            debug_log("WebSocket data received, length: %zu", len);
             handle_websocket_message(client, (char *)in, len);
             break;
 
         case LWS_CALLBACK_CLOSED:
-            debug_log("Client disconnected");
+            debug_log("WebSocket connection closed");
             cleanup_client(client);
             break;
 
+        case LWS_CALLBACK_SERVER_WRITEABLE:
+            debug_log("WebSocket writeable callback");
+            break;
+
         default:
+            debug_log("Unhandled WebSocket callback reason: %d", reason);
             break;
     }
 
@@ -195,28 +204,52 @@ static SSL_CTX* init_ssl_context(void) {
 
 // Connect to Mumble server
 static int connect_to_mumble(struct client_session *client, const char *host) {
-    debug_log("Connecting to Mumble server at %s:%d", host, MUMBLE_PORT);
+    debug_log("Attempting to connect to Mumble server at %s:%d", host, MUMBLE_PORT);
     
     struct sockaddr_in addr;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    CHECK_SOCKET(sock, "Failed to create socket");
+    if (sock < 0) {
+        debug_log("Socket creation failed: %s", strerror(errno));
+        return -1;
+    }
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(MUMBLE_PORT);
-    addr.sin_addr.s_addr = inet_addr(host);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
+        debug_log("Invalid address: %s", host);
+        close(sock);
+        return -1;
+    }
 
-    CHECK_SOCKET(connect(sock, (struct sockaddr*)&addr, sizeof(addr)),
-                "Failed to connect to Mumble server");
+    debug_log("Connecting to socket...");
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        debug_log("Connect failed: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
 
+    debug_log("Socket connected, setting up SSL...");
     client->mumble_fd = sock;
     client->ssl = SSL_new(server_state.ssl_ctx);
-    CHECK_NULL(client->ssl, "Failed to create SSL context");
-    
-    SSL_set_fd(client->ssl, sock);
-    CHECK_SSL(SSL_connect(client->ssl), "SSL connection failed");
+    if (!client->ssl) {
+        debug_log("SSL_new failed");
+        close(sock);
+        return -1;
+    }
 
-    debug_log("Successfully connected to Mumble server");
+    SSL_set_fd(client->ssl, sock);
+    debug_log("Performing SSL handshake...");
+    
+    int ret = SSL_connect(client->ssl);
+    if (ret <= 0) {
+        debug_log("SSL handshake failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        SSL_free(client->ssl);
+        close(sock);
+        return -1;
+    }
+
+    debug_log("SSL connection established");
     return 0;
 }
 
@@ -445,40 +478,55 @@ static void *mumble_receive_thread(void *arg) {
 
 // Handle incoming WebSocket messages
 static void handle_websocket_message(struct client_session *client, char *msg, size_t len) {
-    (void)len;  // Mark len as used to suppress warning
+    debug_log("Processing WebSocket message: %.*s", (int)len, msg);
     
     json_error_t error;
     json_t *root = json_loads(msg, 0, &error);
     if (!root) {
+        debug_log("Failed to parse JSON: %s", error.text);
         return;
     }
 
     const char *type = json_string_value(json_object_get(root, "type"));
     if (!type) {
+        debug_log("Message missing 'type' field");
         json_decref(root);
         return;
     }
 
+    debug_log("Received message type: %s", type);
+
     if (strcmp(type, "user-info") == 0) {
         const char *username = json_string_value(json_object_get(root, "username"));
-        const char *server = json_string_value(json_object_get(root, "server"));
         if (username) {
+            debug_log("User info received for: %s", username);
             strncpy(client->username, username, sizeof(client->username) - 1);
-            if (server) {
-                client->server_host = strdup(server);
-            }
+            client->username[sizeof(client->username) - 1] = '\0';
+            
+            // Start authentication process
             handle_authentication(client);
+        } else {
+            debug_log("User info missing username");
         }
     }
     else if (strcmp(type, "audio-data") == 0) {
+        if (!client->authenticated) {
+            debug_log("Received audio data but client not authenticated");
+            json_decref(root);
+            return;
+        }
+        
         json_t *data = json_object_get(root, "data");
         if (json_is_string(data)) {
             const char *audio_data = json_string_value(data);
             size_t decoded_len;
             unsigned char *decoded = base64_decode(audio_data, &decoded_len);
             if (decoded) {
+                debug_log("Forwarding audio data, length: %zu", decoded_len);
                 forward_to_mumble(client, decoded, decoded_len);
                 free(decoded);
+            } else {
+                debug_log("Failed to decode audio data");
             }
         }
     }
@@ -541,30 +589,46 @@ int main(void) {
     // Initialize SSL
     server_state.ssl_ctx = init_ssl_context();
     if (!server_state.ssl_ctx) {
+        debug_log("Failed to initialize SSL context");
         return 1;
     }
 
     // WebSocket server config
-    struct lws_context_creation_info info = {
-        .port = WS_PORT,
-        .protocols = protocols,
-        .gid = -1,
-        .uid = -1,
-    };
+    struct lws_context_creation_info info;
+    memset(&info, 0, sizeof(info));
+    
+    info.port = WS_PORT;
+    info.protocols = protocols;
+    info.gid = -1;
+    info.uid = -1;
+    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+    
+    // Set up logging
+    int logs = LLL_ERR | LLL_WARN | LLL_NOTICE;
+    lws_set_log_level(logs, NULL);
 
+    debug_log("Creating WebSocket context on port %d", WS_PORT);
+    
     // Create WebSocket context
     server_state.ws_context = lws_create_context(&info);
     if (!server_state.ws_context) {
+        debug_log("Failed to create WebSocket context");
         SSL_CTX_free(server_state.ssl_ctx);
         return 1;
     }
 
-    printf("Mumble WebSocket bridge server running on port %d...\n", WS_PORT);
+    debug_log("Mumble WebSocket bridge server running on port %d...", WS_PORT);
 
     // Main event loop
     while (server_state.running) {
-        lws_service(server_state.ws_context, 50);
+        int n = lws_service(server_state.ws_context, 50);
+        if (n < 0) {
+            debug_log("WebSocket service error: %d", n);
+            break;
+        }
     }
+
+    debug_log("Server shutting down...");
 
     // Cleanup
     lws_context_destroy(server_state.ws_context);
