@@ -47,7 +47,7 @@ class MumbleClient {
             });
 
             // Create WebSocket connection to our server
-            this.connection = new WebSocket(`ws://${window.location.hostname}:64738/mumble`);
+            this.connection = new WebSocket(`wss://nimmerchat.xyz/mumble`);
             this.connection.onopen = () => this.handleConnectionOpen();
             this.connection.onclose = () => this.handleConnectionClose();
             this.connection.onerror = (error) => this.handleConnectionError(error);
