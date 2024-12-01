@@ -119,18 +119,88 @@ setup_service() {
 setup_nginx() {
     echo "🌐 Configuring Nginx..."
     
-    # Backup existing config if it exists
-    if [ -f /etc/nginx/sites-enabled/default ]; then
-        mv /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.bak
+    # Remove any existing mumble-webui config
+    rm -f /etc/nginx/sites-enabled/mumble-webui
+    rm -f /etc/nginx/sites-available/mumble-webui
+    
+    # Backup existing default config if it exists and hasn't been backed up
+    if [ -f /etc/nginx/sites-enabled/default ] && [ ! -f /etc/nginx/sites-enabled/default.bak ]; then
+        echo "📑 Backing up default Nginx config..."
+        cp /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.bak
     fi
     
-    # Copy our nginx config
-    cp nginx.conf /etc/nginx/sites-available/mumble-webui
+    # Check for existing configurations with the same server_name
+    local hostname=$(hostname)
+    echo "🔍 Checking for conflicting Nginx configurations..."
+    if grep -r "server_name.*$hostname" /etc/nginx/sites-enabled/ >/dev/null 2>&1; then
+        echo "⚠️  Warning: Found existing configuration for $hostname"
+        echo "   You may need to manually resolve server_name conflicts"
+    fi
+    
+    # Generate nginx configuration
+    echo "📝 Generating Nginx configuration..."
+    cat > /etc/nginx/sites-available/mumble-webui << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $hostname;
+
+    location / {
+        root /opt/webui-mumble;
+        index index.html;
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    location /mumble {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+        proxy_connect_timeout 86400;
+        proxy_buffering off;
+        proxy_cache off;
+        access_log /var/log/nginx/mumble_access.log;
+        error_log /var/log/nginx/mumble_error.log debug;
+    }
+
+    error_page 500 502 503 504 /50x.html;
+    location = /50x.html {
+        root /usr/share/nginx/html;
+    }
+}
+EOF
+    
+    # Create symlink
     ln -sf /etc/nginx/sites-available/mumble-webui /etc/nginx/sites-enabled/
     
-    # Test and reload nginx
-    nginx -t
+    # Test nginx configuration
+    echo "🔍 Testing Nginx configuration..."
+    if ! nginx -t; then
+        echo "❌ Nginx configuration test failed"
+        return 1
+    fi
+    
+    # Reload nginx
+    echo "🔄 Reloading Nginx..."
     systemctl reload nginx
+    
+    echo "✅ Nginx configuration complete"
+    
+    # Update client configuration
+    echo "🔧 Updating client configuration..."
+    local protocol="http"
+    if [ -d "/etc/letsencrypt/live/$hostname" ]; then
+        protocol="https"
+    fi
+    
+    # Update the WebSocket URL in app.js
+    sed -i "s|wss://[^/]*/mumble|${protocol}://${hostname}/mumble|g" /opt/webui-mumble/app.js
 }
 
 # Function to set permissions
@@ -168,11 +238,46 @@ cleanup() {
 # Set up error handling (bash-specific)
 trap handle_error ERR
 
+# Function to check system configuration
+check_system() {
+    echo "🔍 Checking system configuration..."
+    
+    # Check if port 8080 is already in use
+    if netstat -tuln | grep -q ":8080 "; then
+        echo "⚠️  Warning: Port 8080 is already in use"
+        echo "   You may need to stop other services using this port"
+    fi
+    
+    # Check if required directories exist
+    for dir in "/var/log/nginx" "/var/log/mumble-webui"; do
+        if [ ! -d "$dir" ]; then
+            echo "📁 Creating missing directory: $dir"
+            mkdir -p "$dir"
+        fi
+    done
+    
+    # Check nginx logs permissions
+    if [ -d "/var/log/nginx" ]; then
+        chown -R www-data:adm /var/log/nginx
+        chmod -R 755 /var/log/nginx
+    fi
+    
+    # Check if SSL is available
+    local hostname=$(hostname)
+    if [ -d "/etc/letsencrypt/live/$hostname" ]; then
+        echo "🔒 SSL certificate found for $hostname"
+    else
+        echo "⚠️  No SSL certificate found for $hostname"
+        echo "   The service will run on HTTP only"
+    fi
+}
+
 # Main build process
 main() {
     echo "🎯 Starting main build process..."
     
     check_root
+    check_system
     install_deps
     create_dirs
     build_server
@@ -182,7 +287,11 @@ main() {
     
     echo "✅ Build complete! Services should be running."
     echo "📝 Check logs with: journalctl -u mumble-webui -f"
-    echo "🌐 Access the web interface at: https://$(hostname)"
+    local protocol="http"
+    if [ -d "/etc/letsencrypt/live/$(hostname)" ]; then
+        protocol="https"
+    fi
+    echo "🌐 Access the web interface at: ${protocol}://$(hostname)"
 }
 
 # Run main function
