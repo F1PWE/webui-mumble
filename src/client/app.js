@@ -63,7 +63,8 @@ class MumbleClient {
                     // Send initial user data
                     this.connection.send(JSON.stringify({
                         type: 'user-info',
-                        username: this.usernameInput.value || 'Guest'
+                        username: this.usernameInput.value || 'Guest',
+                        server: 'nimmerchat.xyz'
                     }));
                 };
 

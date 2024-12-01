@@ -53,7 +53,7 @@ static void debug_log(const char *format, ...) {
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
 #define WS_PORT 8080
-#define DEFAULT_HOST "127.0.0.1"
+#define DEFAULT_HOST "nimmerchat.xyz"
 #define MUMBLE_VERSION_1 0x10203  // Mumble 1.2.3
 #define MUMBLE_VERSION_2 0x10205  // Mumble 1.2.5
 
@@ -267,8 +267,24 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
             continue;
         }
         
+        // Set socket timeout
+        struct timeval tv;
+        tv.tv_sec = 5;  // 5 seconds timeout
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+        
         if (connect(sock, rp->ai_addr, rp->ai_addrlen) != -1) {
             // Connected successfully
+            char addr_str[INET6_ADDRSTRLEN];
+            void *addr;
+            if (rp->ai_family == AF_INET) {
+                addr = &((struct sockaddr_in *)rp->ai_addr)->sin_addr;
+            } else {
+                addr = &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr;
+            }
+            inet_ntop(rp->ai_family, addr, addr_str, sizeof(addr_str));
+            debug_log("Connected to address: %s", addr_str);
             break;
         }
         
@@ -580,6 +596,12 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
             } else {
                 debug_log("Using default server: %s", DEFAULT_HOST);
                 client->server_host = strdup(DEFAULT_HOST);
+            }
+            
+            if (!client->server_host) {
+                debug_log("Failed to allocate server host");
+                json_decref(root);
+                return;
             }
             
             // Start authentication process
