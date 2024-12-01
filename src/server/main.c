@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <netdb.h>
 
 // Debug logging function
 static void debug_log(const char *format, ...) {
@@ -52,7 +53,7 @@ static void debug_log(const char *format, ...) {
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
 #define WS_PORT 8080
-#define DEFAULT_HOST "nimmerchat.xyz"
+#define DEFAULT_HOST "127.0.0.1"
 #define MUMBLE_VERSION_1 0x10203  // Mumble 1.2.3
 #define MUMBLE_VERSION_2 0x10205  // Mumble 1.2.5
 
@@ -143,10 +144,11 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
                 debug_log("Failed to allocate server host");
                 return -1;
             }
+            debug_log("Client session initialized");
             break;
 
         case LWS_CALLBACK_RECEIVE:
-            debug_log("WebSocket data received, length: %zu", len);
+            debug_log("WebSocket data received, length: %zu, data: %.*s", len, (int)len, (char *)in);
             if (len > 0) {
                 char *msg = malloc(len + 1);
                 if (!msg) {
@@ -161,32 +163,16 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
             break;
 
         case LWS_CALLBACK_SERVER_WRITEABLE:
-            debug_log("WebSocket writeable");
+            debug_log("WebSocket writeable callback");
             break;
 
         case LWS_CALLBACK_CLOSED:
-            debug_log("WebSocket connection closed");
+            debug_log("WebSocket connection closed, cleaning up client");
             cleanup_client(client);
             break;
 
-        case LWS_CALLBACK_WSI_CREATE:
-            debug_log("WebSocket instance created");
-            break;
-
-        case LWS_CALLBACK_WSI_DESTROY:
-            debug_log("WebSocket instance destroyed");
-            break;
-
-        case LWS_CALLBACK_PROTOCOL_INIT:
-            debug_log("Protocol initialized");
-            break;
-
-        case LWS_CALLBACK_PROTOCOL_DESTROY:
-            debug_log("Protocol destroyed");
-            break;
-
         default:
-            // Ignore other callbacks
+            debug_log("Unhandled callback reason: %d", reason);
             break;
     }
 
@@ -232,50 +218,68 @@ static SSL_CTX* init_ssl_context(void) {
 static int connect_to_mumble(struct client_session *client, const char *host) {
     debug_log("Attempting to connect to Mumble server at %s:%d", host, MUMBLE_PORT);
     
-    struct sockaddr_in addr;
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        debug_log("Socket creation failed: %s", strerror(errno));
+    struct addrinfo hints, *result, *rp;
+    char port_str[6];
+    int sock = -1;
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;    // Allow IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_ADDRCONFIG;
+    
+    snprintf(port_str, sizeof(port_str), "%d", MUMBLE_PORT);
+    
+    int ret = getaddrinfo(host, port_str, &hints, &result);
+    if (ret != 0) {
+        debug_log("Failed to resolve host %s: %s", host, gai_strerror(ret));
         return -1;
     }
-
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(MUMBLE_PORT);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        debug_log("Invalid address: %s", host);
+    
+    // Try each address until we successfully connect
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock == -1) {
+            continue;
+        }
+        
+        if (connect(sock, rp->ai_addr, rp->ai_addrlen) != -1) {
+            // Connected successfully
+            break;
+        }
+        
         close(sock);
+        sock = -1;
+    }
+    
+    freeaddrinfo(result);
+    
+    if (sock == -1) {
+        debug_log("Could not connect to any resolved addresses for %s", host);
         return -1;
     }
-
-    debug_log("Connecting to socket...");
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        debug_log("Connect failed: %s", strerror(errno));
-        close(sock);
-        return -1;
-    }
-
+    
     debug_log("Socket connected, setting up SSL...");
-    client->mumble_fd = sock;
     client->ssl = SSL_new(server_state.ssl_ctx);
     if (!client->ssl) {
-        debug_log("SSL_new failed");
+        debug_log("SSL_new failed: %s", ERR_error_string(ERR_get_error(), NULL));
         close(sock);
         return -1;
     }
-
+    
     SSL_set_fd(client->ssl, sock);
     debug_log("Performing SSL handshake...");
     
-    int ret = SSL_connect(client->ssl);
+    ret = SSL_connect(client->ssl);
     if (ret <= 0) {
-        debug_log("SSL handshake failed: %s", ERR_error_string(ERR_get_error(), NULL));
+        int err = SSL_get_error(client->ssl, ret);
+        debug_log("SSL handshake failed: %s (error: %d)", ERR_error_string(ERR_get_error(), NULL), err);
         SSL_free(client->ssl);
         close(sock);
         return -1;
     }
-
-    debug_log("SSL connection established");
+    
+    debug_log("SSL connection established, cipher: %s", SSL_get_cipher(client->ssl));
+    client->mumble_fd = sock;
     return 0;
 }
 
@@ -519,24 +523,23 @@ static void *mumble_receive_thread(void *arg) {
 
 // Handle incoming WebSocket messages
 static void handle_websocket_message(struct client_session *client, char *msg, size_t len) {
-    debug_log("Processing WebSocket message: %.*s", (int)len, msg);
-    
     json_error_t error;
     json_t *root = json_loads(msg, 0, &error);
+    
     if (!root) {
-        debug_log("Failed to parse JSON: %s", error.text);
+        debug_log("Failed to parse JSON message: %s", error.text);
         return;
     }
-
+    
     const char *type = json_string_value(json_object_get(root, "type"));
     if (!type) {
         debug_log("Message missing 'type' field");
         json_decref(root);
         return;
     }
-
+    
     debug_log("Received message type: %s", type);
-
+    
     if (strcmp(type, "user-info") == 0) {
         const char *username = json_string_value(json_object_get(root, "username"));
         if (username) {
@@ -544,14 +547,26 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
             strncpy(client->username, username, sizeof(client->username) - 1);
             client->username[sizeof(client->username) - 1] = '\0';
             
+            // Store server host
+            const char *server = json_string_value(json_object_get(root, "server"));
+            if (server) {
+                debug_log("Using specified server: %s", server);
+                client->server_host = strdup(server);
+            } else {
+                debug_log("Using default server: %s", DEFAULT_HOST);
+                client->server_host = strdup(DEFAULT_HOST);
+            }
+            
             // Start authentication process
-            debug_log("Starting authentication for user: %s", username);
+            debug_log("Starting authentication for user: %s on server: %s", username, client->server_host);
             handle_authentication(client);
         } else {
             debug_log("User info missing username");
         }
+    } else {
+        debug_log("Unknown message type: %s", type);
     }
-
+    
     json_decref(root);
 }
 
