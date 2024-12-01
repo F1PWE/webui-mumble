@@ -11,6 +11,17 @@
 #include <jansson.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <stdarg.h>  // For va_list
+
+// Debug logging function
+static void debug_log(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    fprintf(stderr, "[DEBUG] ");
+    vfprintf(stderr, format, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
 
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
@@ -158,32 +169,28 @@ static SSL_CTX* init_ssl_context(void) {
 
 // Connect to Mumble server
 static int connect_to_mumble(struct client_session *client, const char *host) {
+    debug_log("Connecting to Mumble server at %s:%d", host, MUMBLE_PORT);
+    
     struct sockaddr_in addr;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        return -1;
-    }
+    CHECK_SOCKET(sock, "Failed to create socket");
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(MUMBLE_PORT);
     addr.sin_addr.s_addr = inet_addr(host);
 
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        return -1;
-    }
+    CHECK_SOCKET(connect(sock, (struct sockaddr*)&addr, sizeof(addr)),
+                "Failed to connect to Mumble server");
 
     client->mumble_fd = sock;
     client->ssl = SSL_new(server_state.ssl_ctx);
+    CHECK_NULL(client->ssl, "Failed to create SSL context");
+    
     SSL_set_fd(client->ssl, sock);
+    CHECK_SSL(SSL_connect(client->ssl), "SSL connection failed");
 
-    if (SSL_connect(client->ssl) <= 0) {
-        SSL_free(client->ssl);
-        close(sock);
-        return -1;
-    }
-
+    debug_log("Successfully connected to Mumble server");
     return 0;
 }
 
@@ -332,16 +339,6 @@ static void handle_mumble_packet(struct client_session *client, const unsigned c
             debug_log("Unhandled Mumble packet type: %d", type);
             break;
     }
-}
-
-// Add debug logging
-static void debug_log(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    fprintf(stderr, "[DEBUG] ");
-    vfprintf(stderr, format, args);
-    fprintf(stderr, "\n");
-    va_end(args);
 }
 
 // Modified handle_authentication function
