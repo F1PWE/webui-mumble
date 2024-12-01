@@ -392,95 +392,34 @@ static void handle_mumble_packet(struct client_session *client, const unsigned c
     
     debug_log("Received Mumble packet: type=%d, length=%u", type, length);
     
-    const unsigned char *payload = data + 6;
-    
     switch (type) {
-        case Version:
+        case Version: {
             debug_log("Received Version packet, sending auth");
             send_auth_packet(client);
-            break;
             
-        case UserState: {
-            debug_log("Received UserState packet");
-            // Create user state JSON
-            json_t *user = json_object();
-            json_t *users = json_array();
-            
-            // Parse Mumble protocol buffer (simplified for example)
-            uint32_t session_id;
-            char name[128];
-            int muted = 0, deafened = 0;
-            
-            memcpy(&session_id, payload, 4);
-            session_id = ntohl(session_id);
-            
-            // Extract name (assuming it follows session ID)
-            size_t name_len = strnlen((char *)payload + 4, length - 4);
-            strncpy(name, (char *)payload + 4, name_len);
-            name[name_len] = '\0';
-            
-            // Create user object
-            json_object_set_new(user, "session", json_integer(session_id));
-            json_object_set_new(user, "name", json_string(name));
-            json_object_set_new(user, "muted", json_boolean(muted));
-            json_object_set_new(user, "deafened", json_boolean(deafened));
-            
-            json_array_append_new(users, user);
-            
-            // Create message
-            json_t *msg = json_object();
-            json_object_set_new(msg, "type", json_string("user-state"));
-            json_object_set_new(msg, "users", users);
-            
-            char *msg_str = json_dumps(msg, JSON_COMPACT);
-            forward_to_websocket(client, (unsigned char *)msg_str, strlen(msg_str));
-            
-            free(msg_str);
-            json_decref(msg);
+            // Send status update to client
+            json_t *status = json_object();
+            json_object_set_new(status, "type", json_string("connection-state"));
+            json_object_set_new(status, "status", json_string("version-received"));
+            char *status_str = json_dumps(status, JSON_COMPACT);
+            if (status_str) {
+                forward_to_websocket(client, (unsigned char *)status_str, strlen(status_str));
+                free(status_str);
+            }
+            json_decref(status);
             break;
         }
         
-        case ChannelState: {
-            debug_log("Received ChannelState packet");
-            // Create channel state JSON
-            json_t *channel = json_object();
-            json_t *channels = json_array();
-            
-            // Parse Mumble protocol buffer (simplified for example)
-            uint32_t channel_id;
-            char name[128];
-            uint32_t user_count = 0;
-            
-            memcpy(&channel_id, payload, 4);
-            channel_id = ntohl(channel_id);
-            
-            // Extract name (assuming it follows channel ID)
-            size_t name_len = strnlen((char *)payload + 4, length - 4);
-            strncpy(name, (char *)payload + 4, name_len);
-            name[name_len] = '\0';
-            
-            // Create channel object
-            json_object_set_new(channel, "id", json_integer(channel_id));
-            json_object_set_new(channel, "name", json_string(name));
-            json_object_set_new(channel, "users", json_integer(user_count));
-            
-            json_array_append_new(channels, channel);
-            
-            // Create message
-            json_t *msg = json_object();
-            json_object_set_new(msg, "type", json_string("channel-state"));
-            json_object_set_new(msg, "channels", channels);
-            
-            char *msg_str = json_dumps(msg, JSON_COMPACT);
-            forward_to_websocket(client, (unsigned char *)msg_str, strlen(msg_str));
-            
-            free(msg_str);
-            json_decref(msg);
+        case Authenticate: {
+            debug_log("Received Authentication response");
+            // Forward the authentication response to client
+            forward_to_websocket(client, data, len);
             break;
         }
         
         default:
-            debug_log("Unhandled Mumble packet type: %d", type);
+            // Forward all other packets to client
+            forward_to_websocket(client, data, len);
             break;
     }
 }
@@ -626,14 +565,51 @@ static void forward_to_mumble(struct client_session *client,
 }
 
 // Forward Mumble server data to WebSocket client
-static void forward_to_websocket(struct client_session *client,
-                               const unsigned char *data, size_t len) {
-    unsigned char *ws_buf = malloc(LWS_PRE + len);
-    if (!ws_buf) return;
-
-    memcpy(ws_buf + LWS_PRE, data, len);
-    lws_write(client->wsi, ws_buf + LWS_PRE, len, LWS_WRITE_BINARY);
+static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len) {
+    if (!client || !client->wsi) return;
+    
+    // First 2 bytes are message type
+    uint16_t type;
+    memcpy(&type, data, 2);
+    type = ntohs(type);
+    
+    // Create JSON message
+    json_t *msg = json_object();
+    json_object_set_new(msg, "type", json_string("mumble-data"));
+    json_object_set_new(msg, "messageType", json_integer(type));
+    
+    // Convert binary data to base64
+    size_t b64_len = ((len + 2) / 3) * 4 + 1;
+    char *b64_data = malloc(b64_len);
+    if (!b64_data) {
+        json_decref(msg);
+        return;
+    }
+    
+    EVP_EncodeBlock((unsigned char*)b64_data, data, len);
+    json_object_set_new(msg, "data", json_string(b64_data));
+    free(b64_data);
+    
+    // Convert to string
+    char *json_str = json_dumps(msg, JSON_COMPACT);
+    json_decref(msg);
+    
+    if (!json_str) return;
+    
+    // Prepare WebSocket buffer
+    unsigned char *ws_buf = malloc(LWS_PRE + strlen(json_str));
+    if (!ws_buf) {
+        free(json_str);
+        return;
+    }
+    
+    memcpy(ws_buf + LWS_PRE, json_str, strlen(json_str));
+    
+    // Send via WebSocket
+    lws_write(client->wsi, ws_buf + LWS_PRE, strlen(json_str), LWS_WRITE_TEXT);
+    
     free(ws_buf);
+    free(json_str);
 }
 
 // Clean up client resources

@@ -157,22 +157,52 @@ class MumbleClient {
                     this.updateStatus('Connected as ' + data.username);
                     this.isConnected = true;
                     this.updateButtons();
+                } else if (data.status === 'version-received') {
+                    this.updateStatus('Server version received, authenticating...');
                 }
                 break;
-            case 'user-state':
-                console.log('Updating user list:', data.users);
-                this.updateUserList(data.users);
+            
+            case 'mumble-data':
+                console.log('Received Mumble data, type:', data.messageType);
+                // Handle binary data in base64 format
+                const binaryData = atob(data.data);
+                this.handleMumbleData(data.messageType, binaryData);
                 break;
-            case 'channel-state':
-                console.log('Updating channel list:', data.channels);
-                this.updateChannelList(data.channels);
-                break;
+            
             case 'error':
                 console.error('Server error:', data.message);
                 this.updateStatus('Error: ' + data.message);
                 break;
+            
             default:
                 console.log('Unknown message type:', data.type);
+        }
+    }
+
+    handleMumbleData(type, data) {
+        switch (type) {
+            case 0: // Version
+                console.log('Received Version message');
+                this.updateStatus('Version received');
+                break;
+            
+            case 2: // Authentication
+                console.log('Received Authentication message');
+                this.updateStatus('Authentication response received');
+                break;
+            
+            case 7: // ChannelState
+                console.log('Received Channel State');
+                // Handle channel state update
+                break;
+            
+            case 9: // UserState
+                console.log('Received User State');
+                // Handle user state update
+                break;
+            
+            default:
+                console.log('Received unknown Mumble message type:', type);
         }
     }
 
