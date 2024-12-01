@@ -229,18 +229,28 @@ static struct lws_protocols protocols[] = {
     }
 };
 
-// Initialize SSL context for Mumble connection
+// Initialize SSL context
 static SSL_CTX* init_ssl_context(void) {
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
-
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) {
-        fprintf(stderr, "SSL_CTX_new failed\n");
+        debug_log("Failed to create SSL context: %s", ERR_error_string(ERR_get_error(), NULL));
         return NULL;
     }
-
+    
+    // Set up SSL options
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+    SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
+    
+    // Set cipher list
+    if (!SSL_CTX_set_cipher_list(ctx, "HIGH:!aNULL:!MD5:!RC4")) {
+        debug_log("Failed to set cipher list: %s", ERR_error_string(ERR_get_error(), NULL));
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    
+    // Enable verification
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    
     return ctx;
 }
 
@@ -312,7 +322,37 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
         return -1;
     }
     
+    // Wait for connection to complete
+    fd_set write_fds;
+    struct timeval tv;
+    FD_ZERO(&write_fds);
+    FD_SET(sock, &write_fds);
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    
+    ret = select(sock + 1, NULL, &write_fds, NULL, &tv);
+    if (ret <= 0) {
+        if (ret == 0) {
+            debug_log("Connection timeout");
+        } else {
+            debug_log("Select error: %s", strerror(errno));
+        }
+        close(sock);
+        return -1;
+    }
+    
+    // Check if connection was successful
+    int error;
+    socklen_t error_len = sizeof(error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &error_len) < 0 || error != 0) {
+        debug_log("Connection failed: %s", strerror(error ? error : errno));
+        close(sock);
+        return -1;
+    }
+    
     debug_log("Socket connected, setting up SSL...");
+    
+    // Create new SSL object
     client->ssl = SSL_new(server_state.ssl_ctx);
     if (!client->ssl) {
         debug_log("SSL_new failed: %s", ERR_error_string(ERR_get_error(), NULL));
@@ -320,14 +360,45 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
         return -1;
     }
     
+    // Set SSL socket and options
     SSL_set_fd(client->ssl, sock);
-    SSL_set_mode(client->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-    debug_log("Performing SSL handshake...");
+    SSL_set_connect_state(client->ssl);
+    SSL_set_mode(client->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
     
-    ret = SSL_connect(client->ssl);
-    if (ret <= 0) {
+    // Perform SSL handshake
+    debug_log("Performing SSL handshake...");
+    ERR_clear_error();  // Clear any previous errors
+    
+    while ((ret = SSL_connect(client->ssl)) <= 0) {
         int err = SSL_get_error(client->ssl, ret);
-        debug_log("SSL handshake failed: %s (error: %d)", ERR_error_string(ERR_get_error(), NULL), err);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            // Need to wait for socket to be ready
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(sock, &fds);
+            
+            struct timeval timeout;
+            timeout.tv_sec = 5;
+            timeout.tv_usec = 0;
+            
+            if (err == SSL_ERROR_WANT_READ) {
+                ret = select(sock + 1, &fds, NULL, NULL, &timeout);
+            } else {
+                ret = select(sock + 1, NULL, &fds, NULL, &timeout);
+            }
+            
+            if (ret <= 0) {
+                debug_log("SSL handshake timeout");
+                break;
+            }
+            continue;
+        }
+        
+        // Handle other SSL errors
+        unsigned long e = ERR_get_error();
+        char err_buf[256];
+        ERR_error_string_n(e, err_buf, sizeof(err_buf));
+        debug_log("SSL handshake failed: %s (error: %d, %s)", err_buf, err, ERR_reason_error_string(e));
         SSL_free(client->ssl);
         close(sock);
         return -1;
@@ -804,9 +875,9 @@ int main(void) {
     OpenSSL_add_all_algorithms();
     
     // Create SSL context
-    server_state.ssl_ctx = SSL_CTX_new(TLS_client_method());
+    server_state.ssl_ctx = init_ssl_context();
     if (!server_state.ssl_ctx) {
-        debug_log("Failed to create SSL context");
+        debug_log("Failed to initialize SSL context");
         return 1;
     }
     
@@ -846,6 +917,7 @@ int main(void) {
     server_state.ws_context = lws_create_context(&info);
     if (!server_state.ws_context) {
         debug_log("Failed to create WebSocket context");
+        SSL_CTX_free(server_state.ssl_ctx);
         return 1;
     }
     
@@ -861,6 +933,7 @@ int main(void) {
     lws_context_destroy(server_state.ws_context);
     SSL_CTX_free(server_state.ssl_ctx);
     EVP_cleanup();
+    ERR_free_strings();
     
     return 0;
 } 
