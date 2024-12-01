@@ -102,17 +102,17 @@ static struct {
 } server_state;
 
 // Forward declarations
+static void handle_ssl_error(SSL *ssl, int ret);
+static void send_status_message(struct client_session *client, const char *status, const char *reason);
 static void handle_websocket_message(struct client_session *client, char *msg, size_t len);
-static void cleanup_client(struct client_session *client);
-static void forward_to_mumble(struct client_session *client, const unsigned char *data, size_t len);
-static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len);
-static int connect_to_mumble(struct client_session *client, const char *host);
-static void handle_authentication(struct client_session *client);
-static void *mumble_receive_thread(void *arg);
 static void handle_mumble_packet(struct client_session *client, const unsigned char *data, size_t len);
+static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len);
+static void cleanup_client(struct client_session *client);
+static int connect_to_mumble(struct client_session *client, const char *host);
 static int send_version_packet(struct client_session *client);
 static int send_auth_packet(struct client_session *client);
 static int send_ping_packet(struct client_session *client);
+static void *mumble_receive_thread(void *arg);
 
 // Base64 decoding helper
 static unsigned char *base64_decode(const char *input, size_t *output_length) {
@@ -165,7 +165,7 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
             break;
             
         case LWS_CALLBACK_RECEIVE:
-            if (len > 0) {
+            if (len > 0 && in) {
                 debug_log("WebSocket data received, length: %zu, data: %.*s", len, (int)len, (char *)in);
                 char *msg = malloc(len + 1);
                 if (!msg) {
@@ -677,6 +677,8 @@ static void *mumble_receive_thread(void *arg) {
 
 // Handle incoming WebSocket messages
 static void handle_websocket_message(struct client_session *client, char *msg, size_t len) {
+    (void)len;  // Suppress unused parameter warning
+    
     json_error_t error;
     json_t *root = json_loads(msg, 0, &error);
     
@@ -829,15 +831,15 @@ int main(void) {
         .gid = -1,
         .uid = -1,
         .options = LWS_SERVER_OPTION_VALIDATE_UTF8 |
-                  LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE,
+                  LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE |
+                  LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED,
         .max_http_header_pool = 16,
         .max_http_header_data = 2048,
         .ws_ping_pong_interval = 30,
         .keepalive_timeout = 60,
         .timeout_secs = 60,
         .simultaneous_ssl_restriction = 100,
-        .ssl_options_set = SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1,
-        .options = LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED,
+        .ssl_options_set = SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1
     };
     
     debug_log("Creating WebSocket context...");
