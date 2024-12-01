@@ -119,41 +119,35 @@ setup_service() {
 setup_nginx() {
     echo "🌐 Configuring Nginx..."
     
-    # Remove any existing mumble-webui config
+    # Remove any existing mumble-webui configs
     rm -f /etc/nginx/sites-enabled/mumble-webui
     rm -f /etc/nginx/sites-available/mumble-webui
     
-    # Backup existing default config if it exists and hasn't been backed up
-    if [ -f /etc/nginx/sites-enabled/default ] && [ ! -f /etc/nginx/sites-enabled/default.bak ]; then
-        echo "📑 Backing up default Nginx config..."
-        cp /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.bak
-    fi
-    
-    # Check for existing configurations with the same server_name
+    # Check for existing configurations
     local hostname=$(hostname)
-    echo "🔍 Checking for conflicting Nginx configurations..."
-    if grep -r "server_name.*$hostname" /etc/nginx/sites-enabled/ >/dev/null 2>&1; then
-        echo "⚠️  Warning: Found existing configuration for $hostname"
-        echo "   You may need to manually resolve server_name conflicts"
-    fi
+    echo "🔍 Checking existing Nginx configurations..."
     
-    # Generate nginx configuration
+    # Create nginx configuration
     echo "📝 Generating Nginx configuration..."
     cat > /etc/nginx/sites-available/mumble-webui << EOF
+# HTTP server
 server {
     listen 80;
     listen [::]:80;
     server_name $hostname;
 
+    # Logging
     access_log /var/log/nginx/mumble_access.log;
     error_log /var/log/nginx/mumble_error.log debug;
 
+    # Root directory
     root /opt/webui-mumble;
     index index.html;
 
     # Serve static files
     location / {
         try_files \$uri \$uri/ /index.html;
+        add_header Access-Control-Allow-Origin *;
     }
 
     # WebSocket proxy
@@ -180,9 +174,9 @@ server {
         proxy_buffering off;
         proxy_cache off;
         
-        # Error handling
-        proxy_intercept_errors on;
-        error_page 502 503 504 /50x.html;
+        # Debug logging
+        access_log /var/log/nginx/mumble_ws_access.log;
+        error_log /var/log/nginx/mumble_ws_error.log debug;
     }
 
     # Error pages
@@ -192,9 +186,17 @@ server {
     }
 }
 EOF
-    
+
     # Create symlink
     ln -sf /etc/nginx/sites-available/mumble-webui /etc/nginx/sites-enabled/
+    
+    # Remove default config if it exists
+    rm -f /etc/nginx/sites-enabled/default
+    
+    # Ensure the web root exists and has correct permissions
+    mkdir -p /opt/webui-mumble
+    chown -R www-data:www-data /opt/webui-mumble
+    chmod -R 755 /opt/webui-mumble
     
     # Test nginx configuration
     echo "🔍 Testing Nginx configuration..."
@@ -207,7 +209,19 @@ EOF
     echo "🔄 Reloading Nginx..."
     systemctl reload nginx
     
+    # Verify Nginx is running
+    if ! systemctl is-active nginx >/dev/null; then
+        echo "🔄 Starting Nginx..."
+        systemctl start nginx
+    fi
+    
     echo "✅ Nginx configuration complete"
+    
+    # Check if mumble-webui service is running
+    if ! systemctl is-active mumble-webui >/dev/null; then
+        echo "🔄 Starting mumble-webui service..."
+        systemctl start mumble-webui
+    fi
 }
 
 # Function to set permissions

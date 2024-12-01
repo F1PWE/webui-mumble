@@ -131,25 +131,37 @@ static unsigned char *base64_decode(const char *input, size_t *output_length) {
 static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
                           void *user, void *in, size_t len) {
     struct client_session *client = (struct client_session *)user;
-
+    
     switch (reason) {
+        case LWS_CALLBACK_PROTOCOL_INIT:
+            debug_log("Protocol initialized");
+            break;
+            
+        case LWS_CALLBACK_PROTOCOL_DESTROY:
+            debug_log("Protocol destroyed");
+            break;
+            
         case LWS_CALLBACK_ESTABLISHED:
             debug_log("WebSocket connection established");
-            client->wsi = wsi;
-            client->authenticated = 0;
-            client->buf_len = 0;
-            client->mumble_fd = -1;
-            client->server_host = strdup(DEFAULT_HOST);
-            if (!client->server_host) {
-                debug_log("Failed to allocate server host");
+            if (!client) {
+                debug_log("Failed to allocate client session");
                 return -1;
             }
+            client->wsi = wsi;
+            client->mumble_fd = -1;
+            client->authenticated = 0;
+            client->server_host = NULL;
             debug_log("Client session initialized");
             break;
-
+            
+        case LWS_CALLBACK_CLOSED:
+            debug_log("WebSocket connection closed, cleaning up client");
+            cleanup_client(client);
+            break;
+            
         case LWS_CALLBACK_RECEIVE:
-            debug_log("WebSocket data received, length: %zu, data: %.*s", len, (int)len, (char *)in);
             if (len > 0) {
+                debug_log("WebSocket data received, length: %zu, data: %.*s", len, (int)len, (char *)in);
                 char *msg = malloc(len + 1);
                 if (!msg) {
                     debug_log("Failed to allocate message buffer");
@@ -161,21 +173,34 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
                 free(msg);
             }
             break;
-
+            
         case LWS_CALLBACK_SERVER_WRITEABLE:
             debug_log("WebSocket writeable callback");
             break;
-
-        case LWS_CALLBACK_CLOSED:
-            debug_log("WebSocket connection closed, cleaning up client");
-            cleanup_client(client);
+            
+        case LWS_CALLBACK_WSI_CREATE:
+            debug_log("WebSocket instance created");
             break;
-
+            
+        case LWS_CALLBACK_WSI_DESTROY:
+            debug_log("WebSocket instance destroyed");
+            break;
+            
+        case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
+            debug_log("Filtering protocol connection");
+            break;
+            
+        case LWS_CALLBACK_ADD_POLL_FD:
+        case LWS_CALLBACK_DEL_POLL_FD:
+        case LWS_CALLBACK_CHANGE_MODE_POLL_FD:
+            // Silently handle polling callbacks
+            break;
+            
         default:
             debug_log("Unhandled callback reason: %d", reason);
             break;
     }
-
+    
     return 0;
 }
 
@@ -617,60 +642,74 @@ int main(void) {
     // Initialize server state
     memset(&server_state, 0, sizeof(server_state));
     server_state.running = 1;
-
+    
     // Set up signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-
-    // Initialize SSL
-    server_state.ssl_ctx = init_ssl_context();
+    
+    // Initialize OpenSSL
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    
+    // Create SSL context
+    server_state.ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (!server_state.ssl_ctx) {
-        debug_log("Failed to initialize SSL context");
+        debug_log("Failed to create SSL context");
         return 1;
     }
-
-    // WebSocket server config
-    struct lws_context_creation_info info;
-    memset(&info, 0, sizeof(info));
     
-    info.port = WS_PORT;
-    info.protocols = protocols;
-    info.gid = -1;
-    info.uid = -1;
-    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT |
-                  LWS_SERVER_OPTION_DISABLE_IPV6;  // Force IPv4
+    // WebSocket protocol structure
+    struct lws_protocols protocols[] = {
+        {
+            "mumble-protocol",
+            callback_mumble,
+            sizeof(struct client_session),
+            4096,  // rx buffer size
+            0,     // id
+            NULL,  // user pointer
+            4096   // tx packet size
+        },
+        { NULL, NULL, 0, 0, 0, NULL, 0 }  // terminator
+    };
     
-    // Set up logging
-    int logs = LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO | LLL_DEBUG;
-    lws_set_log_level(logs, NULL);
-
-    debug_log("Creating WebSocket context on port %d", WS_PORT);
+    // WebSocket context creation info
+    struct lws_context_creation_info info = {
+        .port = WS_PORT,
+        .protocols = protocols,
+        .gid = -1,
+        .uid = -1,
+        .options = LWS_SERVER_OPTION_VALIDATE_UTF8 |
+                  LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE,
+        .max_http_header_pool = 16,
+        .max_http_header_data = 2048,
+        .ws_ping_pong_interval = 30,
+        .keepalive_timeout = 60,
+        .timeout_secs = 60,
+        .simultaneous_ssl_restriction = 100,
+        .ssl_options_set = SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1,
+        .options = LWS_SERVER_OPTION_PEER_CERT_NOT_REQUIRED,
+    };
     
-    // Create WebSocket context
+    debug_log("Creating WebSocket context...");
     server_state.ws_context = lws_create_context(&info);
     if (!server_state.ws_context) {
         debug_log("Failed to create WebSocket context");
-        SSL_CTX_free(server_state.ssl_ctx);
         return 1;
     }
-
-    debug_log("Mumble WebSocket bridge server running on port %d...", WS_PORT);
-
+    
+    debug_log("Server started on port %d", WS_PORT);
+    
     // Main event loop
     while (server_state.running) {
-        int n = lws_service(server_state.ws_context, 50);
-        if (n < 0) {
-            debug_log("WebSocket service error: %d", n);
-            break;
-        }
+        lws_service(server_state.ws_context, 50);
     }
-
-    debug_log("Server shutting down...");
-
+    
     // Cleanup
+    debug_log("Server shutting down...");
     lws_context_destroy(server_state.ws_context);
     SSL_CTX_free(server_state.ssl_ctx);
     EVP_cleanup();
-
+    
     return 0;
 } 
