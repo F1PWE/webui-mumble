@@ -147,7 +147,21 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
 
         case LWS_CALLBACK_RECEIVE:
             debug_log("WebSocket data received, length: %zu", len);
-            handle_websocket_message(client, (char *)in, len);
+            if (len > 0) {
+                char *msg = malloc(len + 1);
+                if (!msg) {
+                    debug_log("Failed to allocate message buffer");
+                    return -1;
+                }
+                memcpy(msg, in, len);
+                msg[len] = '\0';
+                handle_websocket_message(client, msg, len);
+                free(msg);
+            }
+            break;
+
+        case LWS_CALLBACK_SERVER_WRITEABLE:
+            debug_log("WebSocket writeable");
             break;
 
         case LWS_CALLBACK_CLOSED:
@@ -155,12 +169,24 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
             cleanup_client(client);
             break;
 
-        case LWS_CALLBACK_SERVER_WRITEABLE:
-            debug_log("WebSocket writeable callback");
+        case LWS_CALLBACK_WSI_CREATE:
+            debug_log("WebSocket instance created");
+            break;
+
+        case LWS_CALLBACK_WSI_DESTROY:
+            debug_log("WebSocket instance destroyed");
+            break;
+
+        case LWS_CALLBACK_PROTOCOL_INIT:
+            debug_log("Protocol initialized");
+            break;
+
+        case LWS_CALLBACK_PROTOCOL_DESTROY:
+            debug_log("Protocol destroyed");
             break;
 
         default:
-            debug_log("Unhandled WebSocket callback reason: %d", reason);
+            // Ignore other callbacks
             break;
     }
 
@@ -602,9 +628,11 @@ int main(void) {
     info.gid = -1;
     info.uid = -1;
     info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+    info.ssl_cert_filepath = "/etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem";
+    info.ssl_private_key_filepath = "/etc/letsencrypt/live/nimmerchat.xyz/privkey.pem";
     
     // Set up logging
-    int logs = LLL_ERR | LLL_WARN | LLL_NOTICE;
+    int logs = LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO;
     lws_set_log_level(logs, NULL);
 
     debug_log("Creating WebSocket context on port %d", WS_PORT);

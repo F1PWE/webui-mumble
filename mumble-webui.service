@@ -14,10 +14,16 @@ RestartSec=5
 Environment=PORT=8080
 StandardOutput=journal
 StandardError=journal
+
+# Security settings
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=true
+ReadOnlyDirectories=/
+ReadWriteDirectories=/var/log/mumble-webui
+ReadOnlyDirectories=/etc/letsencrypt/live/nimmerchat.xyz
+ReadOnlyDirectories=/etc/letsencrypt/archive/nimmerchat.xyz
 
 [Install]
 WantedBy=multi-user.target

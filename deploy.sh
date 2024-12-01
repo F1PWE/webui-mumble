@@ -38,6 +38,10 @@ nginx -t
 # Get SSL certificate
 certbot --nginx -d nimmerchat.xyz --non-interactive --agree-tos --email admin@nimmerchat.xyz
 
+# Set SSL certificate permissions
+chmod -R 755 /etc/letsencrypt/{live,archive}/nimmerchat.xyz
+chown -R www-data:www-data /etc/letsencrypt/{live,archive}/nimmerchat.xyz
+
 # Create log directory
 mkdir -p /var/log/mumble-webui
 chown www-data:www-data /var/log/mumble-webui
