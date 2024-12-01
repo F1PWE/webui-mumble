@@ -8,7 +8,7 @@ fi
 
 # Install required packages
 apt-get update
-apt-get install -y nginx certbot python3-certbot-nginx libcap2-bin ssl-cert
+apt-get install -y nginx certbot python3-certbot-nginx libcap2-bin ssl-cert acl
 
 # Create mumble-web group if it doesn't exist
 if ! getent group mumble-web > /dev/null; then
@@ -55,13 +55,24 @@ certbot --nginx -d nimmerchat.xyz --non-interactive --agree-tos --email admin@ni
 
 if [ -d "/etc/letsencrypt/live/nimmerchat.xyz" ]; then
     echo "Setting SSL certificate permissions..."
-    # Add www-data to ssl-cert group (if not already done)
-    usermod -a -G ssl-cert www-data
-    # Set proper permissions
-    chmod -R 750 /etc/letsencrypt/live/nimmerchat.xyz
-    chmod -R 750 /etc/letsencrypt/archive/nimmerchat.xyz
-    chown -R root:ssl-cert /etc/letsencrypt/live/nimmerchat.xyz
-    chown -R root:ssl-cert /etc/letsencrypt/archive/nimmerchat.xyz
+    
+    # Fix directory permissions
+    find /etc/letsencrypt -type d -exec chmod 755 {} \;
+    find /etc/letsencrypt -type f -exec chmod 644 {} \;
+    
+    # Set group ownership
+    chown -R root:ssl-cert /etc/letsencrypt/live
+    chown -R root:ssl-cert /etc/letsencrypt/archive
+    
+    # Set ACLs for www-data
+    setfacl -R -m u:www-data:rx /etc/letsencrypt/live
+    setfacl -R -m u:www-data:rx /etc/letsencrypt/archive
+    
+    # Ensure private keys are protected
+    find /etc/letsencrypt -name "privkey*.pem" -exec chmod 640 {} \;
+    find /etc/letsencrypt -name "privkey*.pem" -exec chown root:ssl-cert {} \;
+    
+    echo "SSL certificate permissions set"
 else
     echo "Warning: SSL certificate directory not found!"
     echo "Please check if certbot created the certificates correctly."
@@ -87,3 +98,5 @@ echo -n "Checking SSL certificate: "
 [ -f "/etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem" ] && echo "OK" || echo "Missing!"
 echo -n "Checking www-data groups: "
 groups www-data
+echo -n "Checking SSL certificate permissions: "
+ls -l /etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem
