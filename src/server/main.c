@@ -96,20 +96,21 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
 
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
-            printf("Client connected\n");
+            debug_log("Client connected");
             client->wsi = wsi;
             client->authenticated = 0;
             client->buf_len = 0;
             client->mumble_fd = -1;
-            client->server_host = strdup(DEFAULT_HOST);  // Allocate memory for default host
+            client->server_host = strdup(DEFAULT_HOST);
             break;
 
         case LWS_CALLBACK_RECEIVE:
+            debug_log("Received WebSocket message, length: %zu", len);
             handle_websocket_message(client, (char *)in, len);
             break;
 
         case LWS_CALLBACK_CLOSED:
-            printf("Client disconnected\n");
+            debug_log("Client disconnected");
             cleanup_client(client);
             break;
 
@@ -226,7 +227,10 @@ static void send_auth_packet(struct client_session *client) {
 
 // Handle Mumble server packets
 static void handle_mumble_packet(struct client_session *client, const unsigned char *data, size_t len) {
-    if (len < 6) return;  // Minimum packet size
+    if (len < 6) {
+        debug_log("Received too short packet: %zu bytes", len);
+        return;
+    }
     
     uint16_t type;
     uint32_t length;
@@ -235,15 +239,18 @@ static void handle_mumble_packet(struct client_session *client, const unsigned c
     type = ntohs(type);
     length = ntohl(length);
     
+    debug_log("Received Mumble packet: type=%d, length=%u", type, length);
+    
     const unsigned char *payload = data + 6;
     
     switch (type) {
         case Version:
-            // Server version received, send auth
+            debug_log("Received Version packet, sending auth");
             send_auth_packet(client);
             break;
             
         case UserState: {
+            debug_log("Received UserState packet");
             // Create user state JSON
             json_t *user = json_object();
             json_t *users = json_array();
@@ -283,6 +290,7 @@ static void handle_mumble_packet(struct client_session *client, const unsigned c
         }
         
         case ChannelState: {
+            debug_log("Received ChannelState packet");
             // Create channel state JSON
             json_t *channel = json_object();
             json_t *channels = json_array();
@@ -321,7 +329,7 @@ static void handle_mumble_packet(struct client_session *client, const unsigned c
         }
         
         default:
-            printf("Unhandled Mumble packet type: %d\n", type);
+            debug_log("Unhandled Mumble packet type: %d", type);
             break;
     }
 }
@@ -338,20 +346,21 @@ static void debug_log(const char *format, ...) {
 
 // Modified handle_authentication function
 static void handle_authentication(struct client_session *client) {
-    // Connect to Mumble server first
+    debug_log("Attempting to connect to Mumble server: %s", client->server_host);
+    
     if (connect_to_mumble(client, client->server_host) != 0) {
+        debug_log("Failed to connect to Mumble server");
         lws_close_reason(client->wsi, LWS_CLOSE_STATUS_PROTOCOL_ERR, 
                         (unsigned char *)"Failed to connect to Mumble server", 31);
         return;
     }
     
-    // Send version packet
+    debug_log("Connected to Mumble server, sending version packet");
     send_version_packet(client);
     
     client->authenticated = 1;
-    printf("User %s connected to Mumble server %s\n", client->username, client->server_host);
+    debug_log("User %s connected to Mumble server %s", client->username, client->server_host);
     
-    // Start receiving data from Mumble server in a separate thread
     pthread_t recv_thread;
     pthread_create(&recv_thread, NULL, mumble_receive_thread, client);
     pthread_detach(recv_thread);
@@ -362,19 +371,25 @@ static void *mumble_receive_thread(void *arg) {
     struct client_session *client = (struct client_session *)arg;
     unsigned char buffer[4096];
     
+    debug_log("Started Mumble receive thread for user %s", client->username);
+    
     while (client->authenticated) {
         int bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
         if (bytes <= 0) {
             if (bytes < 0) {
-                fprintf(stderr, "SSL_read error\n");
+                debug_log("SSL_read error: %s", ERR_error_string(ERR_get_error(), NULL));
+            } else {
+                debug_log("SSL connection closed");
             }
             break;
         }
         
+        debug_log("Received %d bytes from Mumble server", bytes);
         handle_mumble_packet(client, buffer, bytes);
     }
     
-    // Clean up if thread exits
+    debug_log("Mumble receive thread ending for user %s", client->username);
+    
     if (client->authenticated) {
         client->authenticated = 0;
         lws_callback_on_writable(client->wsi);
