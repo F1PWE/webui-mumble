@@ -627,12 +627,11 @@ int main(void) {
     info.protocols = protocols;
     info.gid = -1;
     info.uid = -1;
-    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
-    info.ssl_cert_filepath = "/etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem";
-    info.ssl_private_key_filepath = "/etc/letsencrypt/live/nimmerchat.xyz/privkey.pem";
+    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT |
+                  LWS_SERVER_OPTION_DISABLE_IPV6;  // Force IPv4
     
     // Set up logging
-    int logs = LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO;
+    int logs = LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO | LLL_DEBUG;
     lws_set_log_level(logs, NULL);
 
     debug_log("Creating WebSocket context on port %d", WS_PORT);

@@ -50,36 +50,58 @@ class MumbleClient {
 
             this.updateStatus('Connecting to server...');
 
-            // Create WebSocket connection
-            this.connection = new WebSocket(`wss://nimmerchat.xyz/mumble`);
-            
-            this.connection.onopen = () => {
-                this.updateStatus('Connected to WebSocket, authenticating...');
-                // Send initial user data
-                this.connection.send(JSON.stringify({
-                    type: 'user-info',
-                    username: this.usernameInput.value || 'Guest'
-                }));
+            // Create WebSocket connection with retry logic
+            const connectWebSocket = () => {
+                this.connection = new WebSocket(`wss://nimmerchat.xyz/mumble`);
+                
+                this.connection.onopen = () => {
+                    console.log('WebSocket connected');
+                    this.updateStatus('Connected to WebSocket, authenticating...');
+                    // Send initial user data
+                    this.connection.send(JSON.stringify({
+                        type: 'user-info',
+                        username: this.usernameInput.value || 'Guest'
+                    }));
+                    this.isConnected = true;
+                    this.updateButtons();
+                };
+
+                this.connection.onclose = (event) => {
+                    console.log('WebSocket closed:', event);
+                    this.updateStatus('Disconnected');
+                    this.isConnected = false;
+                    this.updateButtons();
+                    
+                    // Try to reconnect after 5 seconds
+                    if (!event.wasClean) {
+                        this.updateStatus('Connection lost, retrying in 5s...');
+                        setTimeout(connectWebSocket, 5000);
+                    }
+                };
+
+                this.connection.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    this.updateStatus('Connection error');
+                    this.isConnected = false;
+                    this.updateButtons();
+                };
+
+                this.connection.onmessage = (msg) => {
+                    console.log('Received message:', msg.data);
+                    this.handleMessage(msg);
+                };
             };
 
-            this.connection.onclose = () => {
-                this.updateStatus('Disconnected');
-                this.handleConnectionClose();
-            };
-
-            this.connection.onerror = (error) => {
-                console.error('WebSocket error:', error);
-                this.updateStatus('Connection error');
-                this.handleConnectionError(error);
-            };
-
-            this.connection.onmessage = (msg) => this.handleMessage(msg);
+            // Start the connection
+            connectWebSocket();
 
             // Initialize WebRTC
             this.initializeWebRTC();
         } catch (error) {
             console.error('Connection failed:', error);
             this.updateStatus('Connection failed: ' + error.message);
+            this.isConnected = false;
+            this.updateButtons();
         }
     }
 
@@ -163,8 +185,9 @@ class MumbleClient {
     }
 
     updateStatus(status) {
+        console.log('Status update:', status);
         this.statusElement.textContent = status;
-        this.statusElement.className = status === 'Connected' ? 'connected' : '';
+        this.statusElement.className = this.isConnected ? 'connected' : '';
     }
 
     updateButtons() {
@@ -195,7 +218,7 @@ class MumbleClient {
 
     handleMessage(msg) {
         try {
-            console.log('Received message:', msg.data);
+            console.log('Processing message:', msg.data);
             const data = JSON.parse(msg.data);
             switch (data.type) {
                 case 'user-state':
