@@ -11,7 +11,8 @@
 #include <jansson.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-#include <stdarg.h>  // For va_list
+#include <stdarg.h>
+#include <errno.h>
 
 // Debug logging function
 static void debug_log(const char *format, ...) {
@@ -22,6 +23,31 @@ static void debug_log(const char *format, ...) {
     fprintf(stderr, "\n");
     va_end(args);
 }
+
+// Error checking macros
+#define CHECK_NULL(ptr, msg) \
+    do { \
+        if ((ptr) == NULL) { \
+            debug_log("ERROR: %s", msg); \
+            return -1; \
+        } \
+    } while(0)
+
+#define CHECK_SSL(ret, msg) \
+    do { \
+        if ((ret) <= 0) { \
+            debug_log("SSL ERROR: %s - %s", msg, ERR_error_string(ERR_get_error(), NULL)); \
+            return -1; \
+        } \
+    } while(0)
+
+#define CHECK_SOCKET(ret, msg) \
+    do { \
+        if ((ret) < 0) { \
+            debug_log("SOCKET ERROR: %s - %s", msg, strerror(errno)); \
+            return -1; \
+        } \
+    } while(0)
 
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
@@ -79,8 +105,8 @@ static int connect_to_mumble(struct client_session *client, const char *host);
 static void handle_authentication(struct client_session *client);
 static void *mumble_receive_thread(void *arg);
 static void handle_mumble_packet(struct client_session *client, const unsigned char *data, size_t len);
-static void send_version_packet(struct client_session *client);
-static void send_auth_packet(struct client_session *client);
+static int send_version_packet(struct client_session *client);
+static int send_auth_packet(struct client_session *client);
 
 // Base64 decoding helper
 static unsigned char *base64_decode(const char *input, size_t *output_length) {
@@ -195,7 +221,7 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
 }
 
 // Create Mumble version packet
-static void send_version_packet(struct client_session *client) {
+static int send_version_packet(struct client_session *client) {
     unsigned char packet[12];
     uint16_t type = htons(Version);
     uint32_t version = htonl(MUMBLE_VERSION_2);
@@ -204,19 +230,28 @@ static void send_version_packet(struct client_session *client) {
     memcpy(packet + 2, &version, 4);
     memset(packet + 6, 0, 6);  // Release, OS, OS Version
     
-    SSL_write(client->ssl, packet, sizeof(packet));
+    int ret = SSL_write(client->ssl, packet, sizeof(packet));
+    CHECK_SSL(ret, "Failed to send version packet");
+    
+    debug_log("Sent version packet");
+    return 0;
 }
 
 // Create Mumble authentication packet
-static void send_auth_packet(struct client_session *client) {
+static int send_auth_packet(struct client_session *client) {
     json_t *auth = json_object();
+    CHECK_NULL(auth, "Failed to create auth JSON object");
+    
     json_object_set_new(auth, "username", json_string(client->username));
     json_object_set_new(auth, "password", json_string(""));  // No password for now
+    
     char *auth_str = json_dumps(auth, JSON_COMPACT);
+    CHECK_NULL(auth_str, "Failed to serialize auth JSON");
     
     size_t payload_len = strlen(auth_str);
     size_t packet_len = payload_len + 6;
     unsigned char *packet = malloc(packet_len);
+    CHECK_NULL(packet, "Failed to allocate auth packet");
     
     uint16_t type = htons(Authenticate);
     uint32_t length = htonl(payload_len);
@@ -225,11 +260,16 @@ static void send_auth_packet(struct client_session *client) {
     memcpy(packet + 2, &length, 4);
     memcpy(packet + 6, auth_str, payload_len);
     
-    SSL_write(client->ssl, packet, packet_len);
+    int ret = SSL_write(client->ssl, packet, packet_len);
     
     free(packet);
     free(auth_str);
     json_decref(auth);
+    
+    CHECK_SSL(ret, "Failed to send auth packet");
+    
+    debug_log("Sent auth packet for user %s", client->username);
+    return 0;
 }
 
 // Handle Mumble server packets
@@ -353,13 +393,21 @@ static void handle_authentication(struct client_session *client) {
     }
     
     debug_log("Connected to Mumble server, sending version packet");
-    send_version_packet(client);
+    if (send_version_packet(client) != 0) {
+        debug_log("Failed to send version packet");
+        cleanup_client(client);
+        return;
+    }
     
     client->authenticated = 1;
     debug_log("User %s connected to Mumble server %s", client->username, client->server_host);
     
     pthread_t recv_thread;
-    pthread_create(&recv_thread, NULL, mumble_receive_thread, client);
+    if (pthread_create(&recv_thread, NULL, mumble_receive_thread, client) != 0) {
+        debug_log("Failed to create receive thread");
+        cleanup_client(client);
+        return;
+    }
     pthread_detach(recv_thread);
 }
 
