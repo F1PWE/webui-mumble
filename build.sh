@@ -145,30 +145,47 @@ server {
     listen [::]:80;
     server_name $hostname;
 
+    access_log /var/log/nginx/mumble_access.log;
+    error_log /var/log/nginx/mumble_error.log debug;
+
+    root /opt/webui-mumble;
+    index index.html;
+
+    # Serve static files
     location / {
-        root /opt/webui-mumble;
-        index index.html;
         try_files \$uri \$uri/ /index.html;
     }
 
+    # WebSocket proxy
     location /mumble {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
+        
+        # WebSocket headers
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+        
+        # Proxy headers
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # WebSocket timeouts
         proxy_read_timeout 86400;
         proxy_send_timeout 86400;
         proxy_connect_timeout 86400;
+        
+        # WebSocket specific
         proxy_buffering off;
         proxy_cache off;
-        access_log /var/log/nginx/mumble_access.log;
-        error_log /var/log/nginx/mumble_error.log debug;
+        
+        # Error handling
+        proxy_intercept_errors on;
+        error_page 502 503 504 /50x.html;
     }
 
+    # Error pages
     error_page 500 502 503 504 /50x.html;
     location = /50x.html {
         root /usr/share/nginx/html;
@@ -191,16 +208,6 @@ EOF
     systemctl reload nginx
     
     echo "✅ Nginx configuration complete"
-    
-    # Update client configuration
-    echo "🔧 Updating client configuration..."
-    local protocol="http"
-    if [ -d "/etc/letsencrypt/live/$hostname" ]; then
-        protocol="https"
-    fi
-    
-    # Update the WebSocket URL in app.js
-    sed -i "s|wss://[^/]*/mumble|${protocol}://${hostname}/mumble|g" /opt/webui-mumble/app.js
 }
 
 # Function to set permissions
@@ -245,6 +252,7 @@ check_system() {
     # Check if port 8080 is already in use
     if netstat -tuln | grep -q ":8080 "; then
         echo "⚠️  Warning: Port 8080 is already in use"
+        ps aux | grep ':8080' | grep -v grep
         echo "   You may need to stop other services using this port"
     fi
     
@@ -262,14 +270,60 @@ check_system() {
         chmod -R 755 /var/log/nginx
     fi
     
-    # Check if SSL is available
-    local hostname=$(hostname)
-    if [ -d "/etc/letsencrypt/live/$hostname" ]; then
-        echo "🔒 SSL certificate found for $hostname"
-    else
-        echo "⚠️  No SSL certificate found for $hostname"
-        echo "   The service will run on HTTP only"
+    # Check mumble-webui service status
+    if systemctl is-active mumble-webui >/dev/null 2>&1; then
+        echo "🔄 Stopping existing mumble-webui service..."
+        systemctl stop mumble-webui
     fi
+    
+    # Check if nginx is running
+    if ! systemctl is-active nginx >/dev/null 2>&1; then
+        echo "🔄 Starting nginx service..."
+        systemctl start nginx
+    fi
+}
+
+# Function to verify services
+verify_services() {
+    echo "🔍 Verifying services..."
+    local errors=0
+    
+    # Check nginx
+    if ! systemctl is-active nginx >/dev/null 2>&1; then
+        echo "❌ Nginx is not running"
+        echo "   Try: systemctl start nginx"
+        ((errors++))
+    else
+        echo "✅ Nginx is running"
+    fi
+    
+    # Check mumble-webui
+    if ! systemctl is-active mumble-webui >/dev/null 2>&1; then
+        echo "❌ Mumble WebUI service is not running"
+        echo "   Check logs: journalctl -u mumble-webui -n 50"
+        ((errors++))
+    else
+        echo "✅ Mumble WebUI service is running"
+    fi
+    
+    # Check port 8080
+    if ! netstat -tuln | grep -q ":8080 "; then
+        echo "❌ No service listening on port 8080"
+        ((errors++))
+    else
+        echo "✅ Port 8080 is active"
+    fi
+    
+    # Check nginx config
+    if ! nginx -t >/dev/null 2>&1; then
+        echo "❌ Nginx configuration test failed"
+        ((errors++))
+    else
+        echo "✅ Nginx configuration is valid"
+    fi
+    
+    # Return status
+    return $errors
 }
 
 # Main build process
@@ -285,13 +339,20 @@ main() {
     setup_nginx
     set_permissions
     
-    echo "✅ Build complete! Services should be running."
-    echo "📝 Check logs with: journalctl -u mumble-webui -f"
-    local protocol="http"
-    if [ -d "/etc/letsencrypt/live/$(hostname)" ]; then
-        protocol="https"
+    echo "🔍 Verifying installation..."
+    if verify_services; then
+        echo "✅ All services are running correctly!"
+    else
+        echo "⚠️  Some services may not be running correctly"
+        echo "   Please check the messages above"
     fi
-    echo "🌐 Access the web interface at: ${protocol}://$(hostname)"
+    
+    echo "📝 Check logs with: journalctl -u mumble-webui -f"
+    echo "🌐 Access the web interface at: http://$(hostname)"
+    echo "💡 For detailed logs:"
+    echo "   Nginx access: tail -f /var/log/nginx/mumble_access.log"
+    echo "   Nginx errors: tail -f /var/log/nginx/mumble_error.log"
+    echo "   Mumble WebUI: journalctl -u mumble-webui -f"
 }
 
 # Run main function

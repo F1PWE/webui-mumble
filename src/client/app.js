@@ -50,8 +50,10 @@ class MumbleClient {
                 this.audioStream = stream;
                 this.updateStatus('Connecting to server...');
 
-                // Create WebSocket connection
-                this.connection = new WebSocket(`wss://nimmerchat.xyz/mumble`);
+                // Create WebSocket connection using current hostname
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${wsProtocol}//${window.location.host}/mumble`;
+                this.connection = new WebSocket(wsUrl);
                 
                 this.connection.onopen = () => {
                     console.log('WebSocket connected');
