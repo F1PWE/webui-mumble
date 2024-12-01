@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -O2 -I/usr/include/libwebsockets -I/usr/include/jansson
 LDFLAGS = -lwebsockets -lssl -lcrypto -ljansson
 
 SERVER_SRC = src/server/main.c

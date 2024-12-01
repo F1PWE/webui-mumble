@@ -8,6 +8,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <libwebsockets.h>
+#include <jansson.h>
 
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
@@ -24,6 +25,7 @@ struct client_session {
     int authenticated;           // Authentication state
 };
 
+// Global server state
 static struct {
     struct client_session clients[MAX_CLIENTS];
     int client_count;
@@ -32,18 +34,33 @@ static struct {
     volatile int running;
 } server_state;
 
-// WebSocket protocols
-static struct lws_protocols protocols[] = {
-    {
-        "mumble",
-        callback_mumble,
-        sizeof(struct client_session),
-        4096,
-    },
-    { NULL, NULL, 0, 0 }
-};
+// Forward declarations
+static void handle_websocket_message(struct client_session *client, char *msg, size_t len);
+static void cleanup_client(struct client_session *client);
+static void forward_to_mumble(struct client_session *client, const unsigned char *data, size_t len);
+static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len);
+static int connect_to_mumble(struct client_session *client, const char *host);
+static void handle_authentication(struct client_session *client);
 
-// Handle WebSocket events
+// Base64 decoding helper
+static unsigned char *base64_decode(const char *input, size_t *output_length) {
+    size_t input_length = strlen(input);
+    if (input_length % 4 != 0) return NULL;
+    
+    *output_length = (input_length / 4) * 3;
+    if (input[input_length - 1] == '=') (*output_length)--;
+    if (input[input_length - 2] == '=') (*output_length)--;
+    
+    unsigned char *decoded = malloc(*output_length);
+    if (!decoded) return NULL;
+    
+    // Implement base64 decoding logic here
+    // For now, return empty buffer
+    memset(decoded, 0, *output_length);
+    return decoded;
+}
+
+// WebSocket callback handler
 static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
                           void *user, void *in, size_t len) {
     struct client_session *client = (struct client_session *)user;
@@ -72,6 +89,18 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
 
     return 0;
 }
+
+// WebSocket protocols
+static struct lws_protocols protocols[] = {
+    {
+        "mumble",
+        callback_mumble,
+        sizeof(struct client_session),
+        4096,
+        0,  // ID field
+    },
+    { NULL, NULL, 0, 0, 0 }
+};
 
 // Initialize SSL context for Mumble connection
 static SSL_CTX* init_ssl_context(void) {
@@ -119,9 +148,15 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
     return 0;
 }
 
+// Handle authentication with Mumble server
+static void handle_authentication(struct client_session *client) {
+    // TODO: Implement proper Mumble authentication
+    client->authenticated = 1;
+    printf("User %s authenticated\n", client->username);
+}
+
 // Handle incoming WebSocket messages
 static void handle_websocket_message(struct client_session *client, char *msg, size_t len) {
-    // Parse JSON message
     json_error_t error;
     json_t *root = json_loads(msg, 0, &error);
     if (!root) {
@@ -135,7 +170,6 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
     }
 
     if (strcmp(type, "user-info") == 0) {
-        // Handle initial user info
         const char *username = json_string_value(json_object_get(root, "username"));
         if (username) {
             strncpy(client->username, username, sizeof(client->username) - 1);
@@ -143,7 +177,6 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
         }
     }
     else if (strcmp(type, "audio-data") == 0) {
-        // Handle audio data
         json_t *data = json_object_get(root, "data");
         if (json_is_string(data)) {
             const char *audio_data = json_string_value(data);
@@ -160,7 +193,7 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
 }
 
 // Forward audio data to Mumble server
-static void forward_to_mumble(struct client_session *client, 
+static void forward_to_mumble(struct client_session *client,
                             const unsigned char *data, size_t len) {
     if (client->ssl && client->authenticated) {
         SSL_write(client->ssl, data, len);
@@ -168,7 +201,7 @@ static void forward_to_mumble(struct client_session *client,
 }
 
 // Forward Mumble server data to WebSocket client
-static void forward_to_websocket(struct client_session *client, 
+static void forward_to_websocket(struct client_session *client,
                                const unsigned char *data, size_t len) {
     unsigned char *ws_buf = malloc(LWS_PRE + len);
     if (!ws_buf) return;
@@ -194,6 +227,7 @@ static void cleanup_client(struct client_session *client) {
 
 // Signal handler for graceful shutdown
 static void signal_handler(int signum) {
+    (void)signum;  // Unused parameter
     server_state.running = 0;
 }
 
