@@ -155,6 +155,26 @@ class MumbleClient {
     }
 
     handleMessage(data) {
+        if (data.type === 'mumble-data') {
+            try {
+                // Decode base64 data
+                const decodedStr = atob(data.data);
+                const decodedData = JSON.parse(decodedStr);
+                console.log('Decoded message:', decodedData);
+                
+                // Handle the decoded message
+                this.handleDecodedMessage(decodedData);
+                return;
+            } catch (error) {
+                console.error('Error decoding message:', error);
+            }
+        }
+        
+        // Handle non-mumble-data messages directly
+        this.handleDecodedMessage(data);
+    }
+
+    handleDecodedMessage(data) {
         switch (data.type) {
             case 'connection-state':
                 console.log('Connection state update:', data.status);
@@ -183,16 +203,6 @@ class MumbleClient {
                         
                     default:
                         this.updateStatus('Connection state: ' + data.status);
-                }
-                break;
-                
-            case 'mumble-data':
-                console.log('Received Mumble data, type:', data.messageType);
-                try {
-                    const binaryData = atob(data.data);
-                    this.handleMumbleData(data.messageType, binaryData);
-                } catch (error) {
-                    console.error('Error processing Mumble data:', error);
                 }
                 break;
                 

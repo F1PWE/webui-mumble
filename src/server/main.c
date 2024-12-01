@@ -424,20 +424,88 @@ static void handle_mumble_packet(struct client_session *client, const unsigned c
     }
 }
 
-// Modified handle_authentication function
+// Forward Mumble server data to WebSocket client
+static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len) {
+    if (!client || !client->wsi) return;
+    
+    // Create JSON message
+    json_t *msg = json_object();
+    json_object_set_new(msg, "type", json_string("mumble-data"));
+    
+    // If it's a text message, send it directly
+    if (data[0] == '{') {
+        json_object_set_new(msg, "messageType", json_integer(0));  // Control message
+        json_object_set_new(msg, "data", json_string((const char *)data));
+    } else {
+        // For binary Mumble protocol messages
+        uint16_t type;
+        memcpy(&type, data, 2);
+        type = ntohs(type);
+        json_object_set_new(msg, "messageType", json_integer(type));
+        
+        // Convert binary data to base64
+        size_t b64_len = ((len + 2) / 3) * 4 + 1;
+        char *b64_data = malloc(b64_len);
+        if (!b64_data) {
+            json_decref(msg);
+            return;
+        }
+        
+        EVP_EncodeBlock((unsigned char*)b64_data, data, len);
+        json_object_set_new(msg, "data", json_string(b64_data));
+        free(b64_data);
+    }
+    
+    // Convert to string
+    char *json_str = json_dumps(msg, JSON_COMPACT);
+    json_decref(msg);
+    
+    if (!json_str) return;
+    
+    // Send via WebSocket
+    unsigned char *ws_buf = malloc(LWS_PRE + strlen(json_str));
+    if (!ws_buf) {
+        free(json_str);
+        return;
+    }
+    
+    memcpy(ws_buf + LWS_PRE, json_str, strlen(json_str));
+    lws_write(client->wsi, ws_buf + LWS_PRE, strlen(json_str), LWS_WRITE_TEXT);
+    
+    free(ws_buf);
+    free(json_str);
+}
+
+// Send status message to client
+static void send_status_message(struct client_session *client, const char *status, const char *reason) {
+    json_t *msg = json_object();
+    json_object_set_new(msg, "type", json_string("connection-state"));
+    json_object_set_new(msg, "status", json_string(status));
+    if (reason) {
+        json_object_set_new(msg, "reason", json_string(reason));
+    }
+    
+    char *msg_str = json_dumps(msg, JSON_COMPACT);
+    if (msg_str) {
+        forward_to_websocket(client, (unsigned char *)msg_str, strlen(msg_str));
+        free(msg_str);
+    }
+    json_decref(msg);
+}
+
+// Handle authentication
 static void handle_authentication(struct client_session *client) {
     debug_log("Attempting to connect to Mumble server: %s", client->server_host);
     
     if (connect_to_mumble(client, client->server_host) != 0) {
-        debug_log("Failed to connect to Mumble server");
-        lws_close_reason(client->wsi, LWS_CLOSE_STATUS_PROTOCOL_ERR, 
-                        (unsigned char *)"Failed to connect to Mumble server", 31);
+        send_status_message(client, "error", "Failed to connect to Mumble server");
         return;
     }
     
     debug_log("Connected to Mumble server, sending version packet");
     if (send_version_packet(client) != 0) {
         debug_log("Failed to send version packet");
+        send_status_message(client, "error", "Failed to send version packet");
         cleanup_client(client);
         return;
     }
@@ -445,7 +513,7 @@ static void handle_authentication(struct client_session *client) {
     client->authenticated = 1;
     debug_log("User %s connected to Mumble server %s", client->username, client->server_host);
     
-    // Send initial state to client
+    // Send success message
     json_t *state = json_object();
     json_object_set_new(state, "type", json_string("connection-state"));
     json_object_set_new(state, "status", json_string("authenticated"));
@@ -463,6 +531,7 @@ static void handle_authentication(struct client_session *client) {
     pthread_t recv_thread;
     if (pthread_create(&recv_thread, NULL, mumble_receive_thread, client) != 0) {
         debug_log("Failed to create receive thread");
+        send_status_message(client, "error", "Failed to start receive thread");
         cleanup_client(client);
         return;
     }
@@ -606,54 +675,6 @@ static void forward_to_mumble(struct client_session *client,
     if (client->ssl && client->authenticated) {
         SSL_write(client->ssl, data, len);
     }
-}
-
-// Forward Mumble server data to WebSocket client
-static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len) {
-    if (!client || !client->wsi) return;
-    
-    // First 2 bytes are message type
-    uint16_t type;
-    memcpy(&type, data, 2);
-    type = ntohs(type);
-    
-    // Create JSON message
-    json_t *msg = json_object();
-    json_object_set_new(msg, "type", json_string("mumble-data"));
-    json_object_set_new(msg, "messageType", json_integer(type));
-    
-    // Convert binary data to base64
-    size_t b64_len = ((len + 2) / 3) * 4 + 1;
-    char *b64_data = malloc(b64_len);
-    if (!b64_data) {
-        json_decref(msg);
-        return;
-    }
-    
-    EVP_EncodeBlock((unsigned char*)b64_data, data, len);
-    json_object_set_new(msg, "data", json_string(b64_data));
-    free(b64_data);
-    
-    // Convert to string
-    char *json_str = json_dumps(msg, JSON_COMPACT);
-    json_decref(msg);
-    
-    if (!json_str) return;
-    
-    // Prepare WebSocket buffer
-    unsigned char *ws_buf = malloc(LWS_PRE + strlen(json_str));
-    if (!ws_buf) {
-        free(json_str);
-        return;
-    }
-    
-    memcpy(ws_buf + LWS_PRE, json_str, strlen(json_str));
-    
-    // Send via WebSocket
-    lws_write(client->wsi, ws_buf + LWS_PRE, strlen(json_str), LWS_WRITE_TEXT);
-    
-    free(ws_buf);
-    free(json_str);
 }
 
 // Clean up client resources
