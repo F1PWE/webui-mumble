@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mumble WebUI</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Mumble WebUI</h1>
+            <div id="connection-status">Disconnected</div>
+        </header>
+        
+        <main>
+            <div class="connection-panel">
+                <input type="text" id="username" placeholder="Username">
+                <button id="connect">Connect</button>
+                <button id="disconnect" disabled>Disconnect</button>
+            </div>
+
+            <div class="channels-panel">
+                <h2>Channels</h2>
+                <div id="channel-list"></div>
+            </div>
+
+            <div class="users-panel">
+                <h2>Users</h2>
+                <div id="users-list"></div>
+            </div>
+        </main>
+
+        <div class="controls">
+            <button id="mute" class="control-btn">Mute</button>
+            <button id="deafen" class="control-btn">Deafen</button>
+            <div class="volume-control">
+                <label for="volume">Volume:</label>
+                <input type="range" id="volume" min="0" max="100" value="100">
+            </div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html> 

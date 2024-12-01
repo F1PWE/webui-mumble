@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+mumble-webui-server
+
+# System files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log 
