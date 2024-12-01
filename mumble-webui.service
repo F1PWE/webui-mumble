@@ -22,8 +22,11 @@ ProtectSystem=strict
 ProtectHome=true
 ReadOnlyDirectories=/
 ReadWriteDirectories=/var/log/mumble-webui
-ReadOnlyDirectories=/etc/letsencrypt/live/nimmerchat.xyz
-ReadOnlyDirectories=/etc/letsencrypt/archive/nimmerchat.xyz
+ReadWriteDirectories=/opt/webui-mumble
+ReadOnlyDirectories=/etc/letsencrypt
+
+# SSL certificate access
+SupplementaryGroups=ssl-cert
 
 [Install]
 WantedBy=multi-user.target

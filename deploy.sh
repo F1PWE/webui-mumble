@@ -35,16 +35,24 @@ rm -f /etc/nginx/sites-enabled/default
 # Test Nginx config
 nginx -t
 
-# Get SSL certificate
-certbot --nginx -d nimmerchat.xyz --non-interactive --agree-tos --email admin@nimmerchat.xyz
-
-# Set SSL certificate permissions
-chmod -R 755 /etc/letsencrypt/{live,archive}/nimmerchat.xyz
-chown -R www-data:www-data /etc/letsencrypt/{live,archive}/nimmerchat.xyz
-
 # Create log directory
 mkdir -p /var/log/mumble-webui
 chown www-data:www-data /var/log/mumble-webui
+
+# Get SSL certificate and set permissions
+echo "Getting SSL certificate..."
+certbot --nginx -d nimmerchat.xyz --non-interactive --agree-tos --email admin@nimmerchat.xyz
+
+if [ -d "/etc/letsencrypt/live/nimmerchat.xyz" ]; then
+    echo "Setting SSL certificate permissions..."
+    chmod -R 755 /etc/letsencrypt/live/nimmerchat.xyz
+    chmod -R 755 /etc/letsencrypt/archive/nimmerchat.xyz
+    chown -R www-data:www-data /etc/letsencrypt/live/nimmerchat.xyz
+    chown -R www-data:www-data /etc/letsencrypt/archive/nimmerchat.xyz
+else
+    echo "Warning: SSL certificate directory not found!"
+    echo "Please check if certbot created the certificates correctly."
+fi
 
 # Reload systemd and start services
 systemctl daemon-reload
@@ -55,4 +63,12 @@ systemctl restart nginx
 echo "Deployment complete!"
 echo "Your WebUI is now available at https://nimmerchat.xyz"
 echo "Check service status with: systemctl status mumble-webui"
-echo "View logs with: journalctl -u mumble-webui -f" 
+echo "View logs with: journalctl -u mumble-webui -f"
+
+# Final checks
+echo -n "Checking Nginx status: "
+systemctl is-active nginx
+echo -n "Checking WebUI status: "
+systemctl is-active mumble-webui
+echo -n "Checking SSL certificate: "
+[ -f "/etc/letsencrypt/live/nimmerchat.xyz/fullchain.pem" ] && echo "OK" || echo "Missing!" 
