@@ -93,14 +93,21 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
 // WebSocket protocols
 static struct lws_protocols protocols[] = {
     {
-        "mumble",
-        callback_mumble,
-        sizeof(struct client_session),
-        4096,
-        0,  // ID field
-        NULL, // user pointer
+        .name = "mumble",
+        .callback = callback_mumble,
+        .per_session_data_size = sizeof(struct client_session),
+        .rx_buffer_size = 4096,
+        .id = 0,
+        .user = NULL,
     },
-    { NULL, NULL, 0, 0, 0, NULL }
+    {
+        .name = NULL,
+        .callback = NULL,
+        .per_session_data_size = 0,
+        .rx_buffer_size = 0,
+        .id = 0,
+        .user = NULL,
+    }
 };
 
 // Initialize SSL context for Mumble connection

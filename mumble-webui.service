@@ -1,15 +1,17 @@
 [Unit]
 Description=Mumble WebUI Server
 After=network.target mumble-server.service
+Requires=mumble-server.service
 
 [Service]
 Type=simple
-User=mumble-web
-Group=mumble-web
+User=www-data
+Group=www-data
 WorkingDirectory=/opt/webui-mumble
 ExecStart=/opt/webui-mumble/mumble-webui-server
 Restart=always
 RestartSec=5
+Environment=PORT=8080
 
 [Install]
-WantedBy=multi-user.target 
+WantedBy=multi-user.target
