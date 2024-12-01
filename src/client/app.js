@@ -179,22 +179,15 @@ class MumbleClient {
         try {
             const data = JSON.parse(msg.data);
             switch (data.type) {
-                case 'ice-candidate':
-                    if (this.peerConnection) {
-                        this.peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                    }
-                    break;
-                case 'offer':
-                    this.handleOffer(data);
-                    break;
-                case 'answer':
-                    this.handleAnswer(data);
-                    break;
-                case 'user-list':
+                case 'user-state':
                     this.updateUserList(data.users);
                     break;
-                case 'channel-list':
+                case 'channel-state':
                     this.updateChannelList(data.channels);
+                    break;
+                case 'error':
+                    console.error('Server error:', data.message);
+                    this.updateStatus('Error: ' + data.message);
                     break;
             }
         } catch (error) {
@@ -202,27 +195,13 @@ class MumbleClient {
         }
     }
 
-    async handleOffer(data) {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-        const answer = await this.peerConnection.createAnswer();
-        await this.peerConnection.setLocalDescription(answer);
-        this.connection.send(JSON.stringify({
-            type: 'answer',
-            answer: answer
-        }));
-    }
-
-    async handleAnswer(data) {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-    }
-
     updateUserList(users) {
         const usersList = document.getElementById('users-list');
         usersList.innerHTML = users.map(user => `
-            <div class="user">
-                <span>${user.username}</span>
-                ${user.muted ? '🔇' : ''}
-                ${user.deafened ? '🔈' : ''}
+            <div class="user ${user.muted ? 'muted' : ''} ${user.deafened ? 'deafened' : ''}">
+                <span class="username">${user.name}</span>
+                ${user.muted ? '<span class="icon">🔇</span>' : ''}
+                ${user.deafened ? '<span class="icon">🔈</span>' : ''}
             </div>
         `).join('');
     }
@@ -231,8 +210,8 @@ class MumbleClient {
         const channelList = document.getElementById('channel-list');
         channelList.innerHTML = channels.map(channel => `
             <div class="channel">
-                <span>${channel.name}</span>
-                <span>${channel.userCount} users</span>
+                <span class="channel-name">${channel.name}</span>
+                <span class="user-count">${channel.users} users</span>
             </div>
         `).join('');
     }

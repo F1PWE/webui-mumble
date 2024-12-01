@@ -48,6 +48,10 @@ main {
     border: 1px solid #ccc;
     padding: 0.5rem;
     min-height: 200px;
+    background: #f8f8f8;
+    border-radius: 4px;
+    padding: 1rem;
+    margin-bottom: 1rem;
 }
 
 /* Controls */
@@ -86,4 +90,37 @@ input[type="text"] {
 
 #connection-status.connected {
     background: #51cf66;
+}
+
+.user,
+.channel {
+    padding: 0.5rem;
+    margin: 0.25rem 0;
+    border-radius: 2px;
+    background: white;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.user.muted .username {
+    color: #999;
+}
+
+.user.deafened .username {
+    color: #666;
+    font-style: italic;
+}
+
+.icon {
+    margin-left: 0.5rem;
+}
+
+.channel-name {
+    font-weight: bold;
+}
+
+.user-count {
+    color: #666;
+    font-size: 0.9em;
 } 
