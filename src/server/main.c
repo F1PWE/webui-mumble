@@ -66,6 +66,10 @@ static void forward_to_mumble(struct client_session *client, const unsigned char
 static void forward_to_websocket(struct client_session *client, const unsigned char *data, size_t len);
 static int connect_to_mumble(struct client_session *client, const char *host);
 static void handle_authentication(struct client_session *client);
+static void *mumble_receive_thread(void *arg);
+static void handle_mumble_packet(struct client_session *client, const unsigned char *data, size_t len);
+static void send_version_packet(struct client_session *client);
+static void send_auth_packet(struct client_session *client);
 
 // Base64 decoding helper
 static unsigned char *base64_decode(const char *input, size_t *output_length) {
@@ -307,7 +311,13 @@ static void *mumble_receive_thread(void *arg) {
         handle_mumble_packet(client, buffer, bytes);
     }
     
-    return NULL;
+    // Clean up if thread exits
+    if (client->authenticated) {
+        client->authenticated = 0;
+        lws_callback_on_writable(client->wsi);
+    }
+    
+    pthread_exit(NULL);
 }
 
 // Handle incoming WebSocket messages
