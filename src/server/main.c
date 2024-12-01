@@ -13,6 +13,7 @@
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
 #define WS_PORT 8080
+#define DEFAULT_HOST "localhost"
 
 // Client connection state
 struct client_session {
@@ -73,7 +74,7 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
             client->authenticated = 0;
             client->buf_len = 0;
             client->mumble_fd = -1;
-            client->server_host = "localhost";  // Default to localhost
+            client->server_host = strdup(DEFAULT_HOST);  // Allocate memory for default host
             break;
 
         case LWS_CALLBACK_RECEIVE:
@@ -251,8 +252,9 @@ static void cleanup_client(struct client_session *client) {
         close(client->mumble_fd);
         client->mumble_fd = -1;
     }
-    if (client->server_host && client->server_host != "localhost") {
+    if (client->server_host) {
         free(client->server_host);
+        client->server_host = NULL;
     }
     client->authenticated = 0;
 }
