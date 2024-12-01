@@ -427,6 +427,35 @@ cleanup_all() {
     exit 0
 }
 
+# Main build process
+main() {
+    echo "🎯 Starting main build process..."
+    
+    check_root
+    check_system
+    install_deps
+    create_dirs
+    build_server
+    setup_service
+    setup_nginx
+    set_permissions
+    
+    echo "🔍 Verifying installation..."
+    if verify_services; then
+        echo "✅ All services are running correctly!"
+    else
+        echo "⚠️  Some services may not be running correctly"
+        echo "   Please check the messages above"
+    fi
+    
+    echo "📝 Check logs with: journalctl -u mumble-webui -f"
+    echo "🌐 Access the web interface at: http://$(hostname)"
+    echo "💡 For detailed logs:"
+    echo "   Nginx access: tail -f /var/log/nginx/mumble_access.log"
+    echo "   Nginx errors: tail -f /var/log/nginx/mumble_error.log"
+    echo "   Mumble WebUI: journalctl -u mumble-webui -f"
+}
+
 # Process command line arguments
 process_args() {
     case "$1" in
