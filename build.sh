@@ -251,9 +251,28 @@ check_system() {
     
     # Check if port 8080 is already in use
     if netstat -tuln | grep -q ":8080 "; then
-        echo "⚠️  Warning: Port 8080 is already in use"
-        ps aux | grep ':8080' | grep -v grep
-        echo "   You may need to stop other services using this port"
+        echo "⚠️  Port 8080 is in use. Checking process..."
+        local pid=$(lsof -t -i:8080)
+        if [ -n "$pid" ]; then
+            local pname=$(ps -p $pid -o comm=)
+            if [[ "$pname" == "mumble-we"* ]]; then
+                echo "📋 Found existing mumble-webui process (PID: $pid)"
+                echo "🔄 Stopping existing process..."
+                systemctl stop mumble-webui
+                sleep 2
+                
+                # Double check if process is still running
+                if kill -0 $pid 2>/dev/null; then
+                    echo "⚠️  Process still running, forcing stop..."
+                    kill -9 $pid
+                    sleep 1
+                fi
+            else
+                echo "❌ Port 8080 is used by another process: $pname"
+                echo "   Please stop this process before continuing"
+                exit 1
+            fi
+        fi
     fi
     
     # Check if required directories exist
@@ -263,6 +282,10 @@ check_system() {
             mkdir -p "$dir"
         fi
     done
+    
+    # Clean up any leftover files
+    echo "🧹 Cleaning up old files..."
+    rm -f /opt/webui-mumble/mumble-webui-server
     
     # Check nginx logs permissions
     if [ -d "/var/log/nginx" ]; then
@@ -274,6 +297,7 @@ check_system() {
     if systemctl is-active mumble-webui >/dev/null 2>&1; then
         echo "🔄 Stopping existing mumble-webui service..."
         systemctl stop mumble-webui
+        sleep 2
     fi
     
     # Check if nginx is running
@@ -281,6 +305,8 @@ check_system() {
         echo "🔄 Starting nginx service..."
         systemctl start nginx
     fi
+    
+    echo "✅ System check complete"
 }
 
 # Function to verify services
@@ -325,6 +351,47 @@ verify_services() {
     # Return status
     return $errors
 }
+
+# Function to perform complete cleanup
+cleanup_all() {
+    echo "🧹 Performing complete cleanup..."
+    
+    # Stop services
+    echo "⏹️  Stopping services..."
+    systemctl stop mumble-webui 2>/dev/null || true
+    
+    # Kill any remaining processes
+    if pgrep -f "mumble-we" > /dev/null; then
+        echo "🔄 Killing remaining processes..."
+        pkill -9 -f "mumble-we"
+    fi
+    
+    # Remove files
+    echo "🗑️  Removing files..."
+    rm -f /etc/systemd/system/mumble-webui.service
+    rm -f /etc/nginx/sites-enabled/mumble-webui
+    rm -f /etc/nginx/sites-available/mumble-webui
+    rm -f /opt/webui-mumble/mumble-webui-server
+    
+    # Restore nginx config
+    if [ -f /etc/nginx/sites-enabled/default.bak ]; then
+        echo "↩️  Restoring nginx config..."
+        mv /etc/nginx/sites-enabled/default.bak /etc/nginx/sites-enabled/default
+        systemctl reload nginx
+    fi
+    
+    # Reload systemd
+    systemctl daemon-reload
+    
+    echo "✅ Cleanup complete"
+    exit 0
+}
+
+# Check for cleanup flag
+if [ "$1" = "--cleanup" ]; then
+    check_root
+    cleanup_all
+fi
 
 # Main build process
 main() {
