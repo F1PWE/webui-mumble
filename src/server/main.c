@@ -12,7 +12,7 @@
 
 #define MAX_CLIENTS 100
 #define MUMBLE_PORT 64738
-#define WS_PORT 64738
+#define WS_PORT 8080
 
 // Client connection state
 struct client_session {
@@ -98,8 +98,9 @@ static struct lws_protocols protocols[] = {
         sizeof(struct client_session),
         4096,
         0,  // ID field
+        NULL, // user pointer
     },
-    { NULL, NULL, 0, 0, 0 }
+    { NULL, NULL, 0, 0, 0, NULL }
 };
 
 // Initialize SSL context for Mumble connection
