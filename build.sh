@@ -359,11 +359,25 @@ cleanup_all() {
     # Stop services
     echo "⏹️  Stopping services..."
     systemctl stop mumble-webui 2>/dev/null || true
+    systemctl disable mumble-webui 2>/dev/null || true
     
     # Kill any remaining processes
-    if pgrep -f "mumble-we" > /dev/null; then
+    local pids=$(pgrep -f "mumble-we")
+    if [ -n "$pids" ]; then
         echo "🔄 Killing remaining processes..."
-        pkill -9 -f "mumble-we"
+        echo "   PIDs: $pids"
+        for pid in $pids; do
+            kill -9 $pid 2>/dev/null || true
+        done
+        sleep 1
+    fi
+    
+    # Check port 8080
+    local port_pid=$(lsof -t -i:8080 2>/dev/null)
+    if [ -n "$port_pid" ]; then
+        echo "🔄 Freeing port 8080..."
+        kill -9 $port_pid 2>/dev/null || true
+        sleep 1
     fi
     
     # Remove files
@@ -371,7 +385,12 @@ cleanup_all() {
     rm -f /etc/systemd/system/mumble-webui.service
     rm -f /etc/nginx/sites-enabled/mumble-webui
     rm -f /etc/nginx/sites-available/mumble-webui
-    rm -f /opt/webui-mumble/mumble-webui-server
+    rm -rf /opt/webui-mumble/*
+    
+    # Remove logs
+    echo "🗑️  Cleaning logs..."
+    rm -f /var/log/mumble-webui/*
+    rm -f /var/log/nginx/mumble_*.log
     
     # Restore nginx config
     if [ -f /etc/nginx/sites-enabled/default.bak ]; then
@@ -381,46 +400,51 @@ cleanup_all() {
     fi
     
     # Reload systemd
+    echo "🔄 Reloading systemd..."
     systemctl daemon-reload
     
-    echo "✅ Cleanup complete"
+    # Verify cleanup
+    echo "🔍 Verifying cleanup..."
+    local errors=0
+    
+    if pgrep -f "mumble-we" > /dev/null; then
+        echo "⚠️  Warning: Some mumble-webui processes still running"
+        ((errors++))
+    fi
+    
+    if lsof -i :8080 > /dev/null 2>&1; then
+        echo "⚠️  Warning: Port 8080 still in use"
+        ((errors++))
+    fi
+    
+    if [ $errors -eq 0 ]; then
+        echo "✅ Cleanup complete - system is clean"
+    else
+        echo "⚠️  Cleanup completed with warnings"
+        echo "   You may need to reboot the system"
+    fi
+    
     exit 0
 }
 
-# Check for cleanup flag
-if [ "$1" = "--cleanup" ]; then
-    check_root
-    cleanup_all
-fi
-
-# Main build process
-main() {
-    echo "🎯 Starting main build process..."
-    
-    check_root
-    check_system
-    install_deps
-    create_dirs
-    build_server
-    setup_service
-    setup_nginx
-    set_permissions
-    
-    echo "🔍 Verifying installation..."
-    if verify_services; then
-        echo "✅ All services are running correctly!"
-    else
-        echo "⚠️  Some services may not be running correctly"
-        echo "   Please check the messages above"
-    fi
-    
-    echo "📝 Check logs with: journalctl -u mumble-webui -f"
-    echo "🌐 Access the web interface at: http://$(hostname)"
-    echo "💡 For detailed logs:"
-    echo "   Nginx access: tail -f /var/log/nginx/mumble_access.log"
-    echo "   Nginx errors: tail -f /var/log/nginx/mumble_error.log"
-    echo "   Mumble WebUI: journalctl -u mumble-webui -f"
+# Process command line arguments
+process_args() {
+    case "$1" in
+        --cleanup)
+            check_root
+            cleanup_all
+            ;;
+        "")
+            # No arguments, run main
+            main
+            ;;
+        *)
+            echo "❌ Unknown argument: $1"
+            echo "Usage: $0 [--cleanup]"
+            exit 1
+            ;;
+    esac
 }
 
-# Run main function
-main 
+# Call process_args with the first argument
+process_args "$1"
