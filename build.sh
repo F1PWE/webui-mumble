@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Check if we're running in bash
+if [ -z "$BASH_VERSION" ]; then
+    echo "⚠️  Please run this script with bash: bash build.sh"
+    exit 1
+fi
+
 # Exit on any error
 set -e
 
@@ -8,9 +14,16 @@ echo "🚀 Starting Mumble WebUI build process..."
 # Function to check if running as root
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo "❌ Please run as root (use sudo)"
+        echo "❌ Please run as root (use sudo bash build.sh)"
         exit 1
     fi
+}
+
+# Function for error handling
+handle_error() {
+    local exit_code=$?
+    echo "❌ Error occurred in build script (exit code: $exit_code)"
+    cleanup
 }
 
 # Function to install dependencies
@@ -96,7 +109,7 @@ set_permissions() {
 
 # Function to clean up on failure
 cleanup() {
-    echo "❌ Build failed! Cleaning up..."
+    echo "🧹 Cleaning up..."
     
     # Stop services
     systemctl stop mumble-webui 2>/dev/null || true
@@ -113,12 +126,12 @@ cleanup() {
         systemctl reload nginx
     fi
     
-    echo "🧹 Cleanup complete"
+    echo "❌ Build failed! Cleanup complete."
     exit 1
 }
 
-# Set up error handling
-trap cleanup ERR
+# Set up error handling (bash-specific)
+trap handle_error ERR
 
 # Main build process
 main() {
