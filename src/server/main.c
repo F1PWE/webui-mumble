@@ -14,6 +14,9 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <netdb.h>
+#include <time.h>
+#include <sys/select.h>
+#include <fcntl.h>
 
 // Debug logging function
 static void debug_log(const char *format, ...) {
@@ -56,6 +59,7 @@ static void debug_log(const char *format, ...) {
 #define DEFAULT_HOST "nimmerchat.xyz"
 #define MUMBLE_VERSION_1 0x10203  // Mumble 1.2.3
 #define MUMBLE_VERSION_2 0x10205  // Mumble 1.2.5
+#define PING_INTERVAL 5  // Send ping every 5 seconds
 
 // Mumble message types
 enum {
@@ -108,6 +112,7 @@ static void *mumble_receive_thread(void *arg);
 static void handle_mumble_packet(struct client_session *client, const unsigned char *data, size_t len);
 static int send_version_packet(struct client_session *client);
 static int send_auth_packet(struct client_session *client);
+static int send_ping_packet(struct client_session *client);
 
 // Base64 decoding helper
 static unsigned char *base64_decode(const char *input, size_t *output_length) {
@@ -267,15 +272,23 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
             continue;
         }
         
-        // Set socket timeout
+        // Set socket options
+        int flag = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        
+        // Set socket timeouts
         struct timeval tv;
         tv.tv_sec = 5;  // 5 seconds timeout
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
         
-        if (connect(sock, rp->ai_addr, rp->ai_addrlen) != -1) {
-            // Connected successfully
+        // Set non-blocking mode
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+        
+        if (connect(sock, rp->ai_addr, rp->ai_addrlen) != -1 || errno == EINPROGRESS) {
+            // Connected or connection in progress
             char addr_str[INET6_ADDRSTRLEN];
             void *addr;
             if (rp->ai_family == AF_INET) {
@@ -308,6 +321,7 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
     }
     
     SSL_set_fd(client->ssl, sock);
+    SSL_set_mode(client->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     debug_log("Performing SSL handshake...");
     
     ret = SSL_connect(client->ssl);
@@ -373,6 +387,25 @@ static int send_auth_packet(struct client_session *client) {
     CHECK_SSL(ret, "Failed to send auth packet");
     
     debug_log("Sent auth packet for user %s", client->username);
+    return 0;
+}
+
+// Send ping packet
+static int send_ping_packet(struct client_session *client) {
+    unsigned char packet[6];
+    uint16_t type = htons(Ping);
+    uint32_t length = 0;
+    
+    memcpy(packet, &type, 2);
+    memcpy(packet + 2, &length, 4);
+    
+    int ret = SSL_write(client->ssl, packet, sizeof(packet));
+    if (ret <= 0) {
+        handle_ssl_error(client->ssl, ret);
+        return -1;
+    }
+    
+    debug_log("Sent ping packet");
     return 0;
 }
 
@@ -574,12 +607,51 @@ static void *mumble_receive_thread(void *arg) {
     struct client_session *client = (struct client_session *)arg;
     unsigned char buffer[4096];
     int bytes;
+    time_t last_ping = time(NULL);
     
     debug_log("Started Mumble receive thread for user %s", client->username);
     
     while (client->authenticated) {
+        // Set up select for SSL read
+        fd_set read_fds;
+        struct timeval tv;
+        FD_ZERO(&read_fds);
+        FD_SET(client->mumble_fd, &read_fds);
+        
+        // Wait up to 1 second for data
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        
+        int ready = select(client->mumble_fd + 1, &read_fds, NULL, NULL, &tv);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            debug_log("Select error: %s", strerror(errno));
+            break;
+        }
+        
+        // Check if it's time to send a ping
+        time_t now = time(NULL);
+        if (now - last_ping >= PING_INTERVAL) {
+            if (send_ping_packet(client) == 0) {
+                last_ping = now;
+            } else {
+                debug_log("Failed to send ping packet");
+                break;
+            }
+        }
+        
+        // If no data is available, continue the loop
+        if (ready == 0) continue;
+        
+        // Try to read data
         bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
         if (bytes <= 0) {
+            int ssl_error = SSL_get_error(client->ssl, bytes);
+            if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+                // Non-blocking operation would block, try again
+                continue;
+            }
+            
             handle_ssl_error(client->ssl, bytes);
             if (bytes == 0) {
                 debug_log("Connection closed by peer");
@@ -588,18 +660,7 @@ static void *mumble_receive_thread(void *arg) {
             }
             
             // Notify client about disconnection
-            json_t *status = json_object();
-            json_object_set_new(status, "type", json_string("connection-state"));
-            json_object_set_new(status, "status", json_string("disconnected"));
-            json_object_set_new(status, "reason", json_string("Server connection lost"));
-            
-            char *status_str = json_dumps(status, JSON_COMPACT);
-            if (status_str) {
-                forward_to_websocket(client, (unsigned char *)status_str, strlen(status_str));
-                free(status_str);
-            }
-            json_decref(status);
-            
+            send_status_message(client, "disconnected", "Server connection lost");
             break;
         }
         
