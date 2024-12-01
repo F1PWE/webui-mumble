@@ -55,14 +55,15 @@ class MumbleClient {
                 const wsUrl = `${wsProtocol}//${window.location.host}/mumble`;
                 this.connection = new WebSocket(wsUrl);
                 
+                this.connection.binaryType = 'arraybuffer';
+                
                 this.connection.onopen = () => {
                     console.log('WebSocket connected');
                     this.updateStatus('Connected to WebSocket, authenticating...');
                     // Send initial user data
                     this.connection.send(JSON.stringify({
                         type: 'user-info',
-                        username: this.usernameInput.value || 'Guest',
-                        server: 'nimmerchat.xyz'
+                        username: this.usernameInput.value || 'Guest'
                     }));
                 };
 
@@ -85,9 +86,29 @@ class MumbleClient {
                     this.updateButtons();
                 };
 
-                this.connection.onmessage = (msg) => {
-                    console.log('Received message:', msg.data);
-                    this.handleMessage(msg);
+                this.connection.onmessage = async (msg) => {
+                    try {
+                        let data;
+                        if (msg.data instanceof ArrayBuffer) {
+                            // Handle binary data (Mumble protocol packets)
+                            this.handleBinaryMessage(new Uint8Array(msg.data));
+                            return;
+                        } else if (msg.data instanceof Blob) {
+                            // Convert Blob to text
+                            data = await msg.data.text();
+                        } else {
+                            // Already text
+                            data = msg.data;
+                        }
+                        
+                        // Parse and handle JSON messages
+                        console.log('Processing message:', data);
+                        const jsonData = JSON.parse(data);
+                        this.handleMessage(jsonData);
+                    } catch (error) {
+                        console.error('Error handling message:', error);
+                        this.updateStatus('Error processing server message');
+                    }
                 };
 
             }).catch(error => {
@@ -98,6 +119,59 @@ class MumbleClient {
         } catch (error) {
             console.error('Connection failed:', error);
             this.updateStatus('Connection failed: ' + error.message);
+        }
+    }
+
+    handleBinaryMessage(data) {
+        // First 2 bytes are message type
+        const type = (data[0] << 8) | data[1];
+        // Next 4 bytes are length
+        const length = (data[2] << 24) | (data[3] << 16) | (data[4] << 8) | data[5];
+        // Remaining bytes are payload
+        const payload = data.slice(6, 6 + length);
+
+        console.log('Binary message:', { type, length, payload });
+
+        switch (type) {
+            case 0: // Version
+                console.log('Received Version message');
+                break;
+            case 2: // Authentication
+                console.log('Received Authentication message');
+                this.updateStatus('Authentication response received');
+                break;
+            case 9: // UserState
+                console.log('Received UserState message');
+                break;
+            default:
+                console.log('Received unknown message type:', type);
+        }
+    }
+
+    handleMessage(data) {
+        switch (data.type) {
+            case 'connection-state':
+                console.log('Connection state update:', data.status);
+                if (data.status === 'authenticated') {
+                    this.updateStatus('Connected as ' + data.username);
+                    this.isConnected = true;
+                    this.updateButtons();
+                }
+                break;
+            case 'user-state':
+                console.log('Updating user list:', data.users);
+                this.updateUserList(data.users);
+                break;
+            case 'channel-state':
+                console.log('Updating channel list:', data.channels);
+                this.updateChannelList(data.channels);
+                break;
+            case 'error':
+                console.error('Server error:', data.message);
+                this.updateStatus('Error: ' + data.message);
+                break;
+            default:
+                console.log('Unknown message type:', data.type);
         }
     }
 
@@ -211,39 +285,6 @@ class MumbleClient {
         console.error('WebSocket error:', error);
         this.updateStatus('Connection error');
         this.disconnect();
-    }
-
-    handleMessage(msg) {
-        try {
-            console.log('Processing message:', msg.data);
-            const data = JSON.parse(msg.data);
-            switch (data.type) {
-                case 'connection-state':
-                    console.log('Connection state update:', data.status);
-                    if (data.status === 'authenticated') {
-                        this.updateStatus('Connected as ' + data.username);
-                        this.isConnected = true;
-                        this.updateButtons();
-                    }
-                    break;
-                case 'user-state':
-                    console.log('Updating user list:', data.users);
-                    this.updateUserList(data.users);
-                    break;
-                case 'channel-state':
-                    console.log('Updating channel list:', data.channels);
-                    this.updateChannelList(data.channels);
-                    break;
-                case 'error':
-                    console.error('Server error:', data.message);
-                    this.updateStatus('Error: ' + data.message);
-                    break;
-                default:
-                    console.log('Unknown message type:', data.type);
-            }
-        } catch (error) {
-            console.error('Error handling message:', error);
-        }
     }
 
     updateUserList(users) {
