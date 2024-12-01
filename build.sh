@@ -51,33 +51,68 @@ create_dirs() {
 # Function to build the server
 build_server() {
     echo "🔨 Building server..."
+    
+    # Stop the service if it's running
+    echo "⏸️  Stopping service for update..."
+    systemctl stop mumble-webui 2>/dev/null || true
+    
+    # Small delay to ensure process is fully stopped
+    sleep 2
+    
+    # Clean and build
     make clean
     make
     
-    # Copy binary and client files
+    # Remove old binary if it exists
+    rm -f /opt/webui-mumble/mumble-webui-server
+    
+    # Copy new files
+    echo "📋 Copying new files..."
     cp mumble-webui-server /opt/webui-mumble/
     cp -r src/client/* /opt/webui-mumble/
+    
+    echo "✨ Build and copy complete"
 }
 
 # Function to set up systemd service
 setup_service() {
     echo "⚙️ Setting up systemd service..."
     
+    # Stop and disable existing service if it exists
+    if systemctl is-active mumble-webui >/dev/null 2>&1; then
+        echo "⏹️  Stopping existing service..."
+        systemctl stop mumble-webui
+        systemctl disable mumble-webui
+    fi
+    
     # Create mumble-web group if it doesn't exist
+    echo "👥 Setting up user groups..."
     groupadd -f mumble-web
     
     # Add www-data to mumble-web group
     usermod -a -G mumble-web www-data
     
     # Copy service file
+    echo "📄 Installing service file..."
     cp mumble-webui.service /etc/systemd/system/
     
     # Reload systemd
+    echo "🔄 Reloading systemd..."
     systemctl daemon-reload
     
     # Enable and start service
+    echo "▶️  Starting service..."
     systemctl enable mumble-webui
     systemctl restart mumble-webui
+    
+    # Check service status
+    echo "🔍 Checking service status..."
+    if ! systemctl is-active mumble-webui >/dev/null 2>&1; then
+        echo "❌ Service failed to start. Check logs with: journalctl -u mumble-webui -n 50"
+        return 1
+    fi
+    
+    echo "✅ Service setup complete"
 }
 
 # Function to configure nginx
