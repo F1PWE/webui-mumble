@@ -461,6 +461,21 @@ static void handle_authentication(struct client_session *client) {
     client->authenticated = 1;
     debug_log("User %s connected to Mumble server %s", client->username, client->server_host);
     
+    // Send initial state to client
+    json_t *state = json_object();
+    json_object_set_new(state, "type", json_string("connection-state"));
+    json_object_set_new(state, "status", json_string("authenticated"));
+    json_object_set_new(state, "username", json_string(client->username));
+    
+    char *state_str = json_dumps(state, JSON_COMPACT);
+    if (state_str) {
+        debug_log("Sending authentication success to client");
+        forward_to_websocket(client, (unsigned char *)state_str, strlen(state_str));
+        free(state_str);
+    }
+    json_decref(state);
+    
+    // Start receive thread
     pthread_t recv_thread;
     if (pthread_create(&recv_thread, NULL, mumble_receive_thread, client) != 0) {
         debug_log("Failed to create receive thread");
@@ -530,30 +545,10 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
             client->username[sizeof(client->username) - 1] = '\0';
             
             // Start authentication process
+            debug_log("Starting authentication for user: %s", username);
             handle_authentication(client);
         } else {
             debug_log("User info missing username");
-        }
-    }
-    else if (strcmp(type, "audio-data") == 0) {
-        if (!client->authenticated) {
-            debug_log("Received audio data but client not authenticated");
-            json_decref(root);
-            return;
-        }
-        
-        json_t *data = json_object_get(root, "data");
-        if (json_is_string(data)) {
-            const char *audio_data = json_string_value(data);
-            size_t decoded_len;
-            unsigned char *decoded = base64_decode(audio_data, &decoded_len);
-            if (decoded) {
-                debug_log("Forwarding audio data, length: %zu", decoded_len);
-                forward_to_mumble(client, decoded, decoded_len);
-                free(decoded);
-            } else {
-                debug_log("Failed to decode audio data");
-            }
         }
     }
 

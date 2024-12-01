@@ -39,19 +39,18 @@ class MumbleClient {
             this.updateStatus('Requesting microphone access...');
             
             // Get microphone access
-            this.audioStream = await navigator.mediaDevices.getUserMedia({
+            navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true
                 },
                 video: false
-            });
+            }).then(stream => {
+                this.audioStream = stream;
+                this.updateStatus('Connecting to server...');
 
-            this.updateStatus('Connecting to server...');
-
-            // Create WebSocket connection with retry logic
-            const connectWebSocket = () => {
+                // Create WebSocket connection
                 this.connection = new WebSocket(`wss://nimmerchat.xyz/mumble`);
                 
                 this.connection.onopen = () => {
@@ -62,8 +61,6 @@ class MumbleClient {
                         type: 'user-info',
                         username: this.usernameInput.value || 'Guest'
                     }));
-                    this.isConnected = true;
-                    this.updateButtons();
                 };
 
                 this.connection.onclose = (event) => {
@@ -72,10 +69,9 @@ class MumbleClient {
                     this.isConnected = false;
                     this.updateButtons();
                     
-                    // Try to reconnect after 5 seconds
                     if (!event.wasClean) {
                         this.updateStatus('Connection lost, retrying in 5s...');
-                        setTimeout(connectWebSocket, 5000);
+                        setTimeout(() => this.connect(), 5000);
                     }
                 };
 
@@ -90,18 +86,15 @@ class MumbleClient {
                     console.log('Received message:', msg.data);
                     this.handleMessage(msg);
                 };
-            };
 
-            // Start the connection
-            connectWebSocket();
+            }).catch(error => {
+                console.error('Microphone access failed:', error);
+                this.updateStatus('Microphone access denied');
+            });
 
-            // Initialize WebRTC
-            this.initializeWebRTC();
         } catch (error) {
             console.error('Connection failed:', error);
             this.updateStatus('Connection failed: ' + error.message);
-            this.isConnected = false;
-            this.updateButtons();
         }
     }
 
@@ -221,6 +214,14 @@ class MumbleClient {
             console.log('Processing message:', msg.data);
             const data = JSON.parse(msg.data);
             switch (data.type) {
+                case 'connection-state':
+                    console.log('Connection state update:', data.status);
+                    if (data.status === 'authenticated') {
+                        this.updateStatus('Connected as ' + data.username);
+                        this.isConnected = true;
+                        this.updateButtons();
+                    }
+                    break;
                 case 'user-state':
                     console.log('Updating user list:', data.users);
                     this.updateUserList(data.users);
