@@ -23,6 +23,7 @@ struct client_session {
     unsigned char buffer[4096];  // Data buffer
     size_t buf_len;             // Buffer length
     int authenticated;           // Authentication state
+    char *server_host;          // Mumble server host
 };
 
 // Global server state
@@ -72,6 +73,7 @@ static int callback_mumble(struct lws *wsi, enum lws_callback_reasons reason,
             client->authenticated = 0;
             client->buf_len = 0;
             client->mumble_fd = -1;
+            client->server_host = "localhost";  // Default to localhost
             break;
 
         case LWS_CALLBACK_RECEIVE:
@@ -158,13 +160,28 @@ static int connect_to_mumble(struct client_session *client, const char *host) {
 
 // Handle authentication with Mumble server
 static void handle_authentication(struct client_session *client) {
-    // TODO: Implement proper Mumble authentication
+    // Connect to Mumble server first
+    if (connect_to_mumble(client, client->server_host) != 0) {
+        lws_close_reason(client->wsi, LWS_CLOSE_STATUS_PROTOCOL_ERR, 
+                        (unsigned char *)"Failed to connect to Mumble server", 31);
+        return;
+    }
+
     client->authenticated = 1;
     printf("User %s authenticated\n", client->username);
+
+    // Start receiving data from Mumble server
+    unsigned char buffer[4096];
+    int bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
+    if (bytes > 0) {
+        forward_to_websocket(client, buffer, bytes);
+    }
 }
 
 // Handle incoming WebSocket messages
 static void handle_websocket_message(struct client_session *client, char *msg, size_t len) {
+    (void)len;  // Mark len as used to suppress warning
+    
     json_error_t error;
     json_t *root = json_loads(msg, 0, &error);
     if (!root) {
@@ -179,8 +196,12 @@ static void handle_websocket_message(struct client_session *client, char *msg, s
 
     if (strcmp(type, "user-info") == 0) {
         const char *username = json_string_value(json_object_get(root, "username"));
+        const char *server = json_string_value(json_object_get(root, "server"));
         if (username) {
             strncpy(client->username, username, sizeof(client->username) - 1);
+            if (server) {
+                client->server_host = strdup(server);
+            }
             handle_authentication(client);
         }
     }
@@ -230,12 +251,15 @@ static void cleanup_client(struct client_session *client) {
         close(client->mumble_fd);
         client->mumble_fd = -1;
     }
+    if (client->server_host && client->server_host != "localhost") {
+        free(client->server_host);
+    }
     client->authenticated = 0;
 }
 
 // Signal handler for graceful shutdown
 static void signal_handler(int signum) {
-    (void)signum;  // Unused parameter
+    (void)signum;  // Mark signum as used to suppress warning
     server_state.running = 0;
 }
 
