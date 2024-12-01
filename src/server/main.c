@@ -469,21 +469,68 @@ static void handle_authentication(struct client_session *client) {
     pthread_detach(recv_thread);
 }
 
+// Function to handle SSL errors
+static void handle_ssl_error(SSL *ssl, int ret) {
+    int err = SSL_get_error(ssl, ret);
+    unsigned long e;
+    
+    switch (err) {
+        case SSL_ERROR_ZERO_RETURN:
+            debug_log("SSL connection closed cleanly");
+            break;
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+            debug_log("SSL operation would block");
+            break;
+        case SSL_ERROR_SYSCALL:
+            e = ERR_get_error();
+            if (e == 0) {
+                if (ret == 0) {
+                    debug_log("SSL EOF observed");
+                } else {
+                    debug_log("SSL syscall error: %s", strerror(errno));
+                }
+            } else {
+                debug_log("SSL syscall error: %s", ERR_error_string(e, NULL));
+            }
+            break;
+        default:
+            debug_log("SSL error: %s", ERR_error_string(err, NULL));
+            break;
+    }
+}
+
 // Mumble receive thread
 static void *mumble_receive_thread(void *arg) {
     struct client_session *client = (struct client_session *)arg;
     unsigned char buffer[4096];
+    int bytes;
     
     debug_log("Started Mumble receive thread for user %s", client->username);
     
     while (client->authenticated) {
-        int bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
+        bytes = SSL_read(client->ssl, buffer, sizeof(buffer));
         if (bytes <= 0) {
-            if (bytes < 0) {
-                debug_log("SSL_read error: %s", ERR_error_string(ERR_get_error(), NULL));
+            handle_ssl_error(client->ssl, bytes);
+            if (bytes == 0) {
+                debug_log("Connection closed by peer");
             } else {
-                debug_log("SSL connection closed");
+                debug_log("SSL_read error occurred");
             }
+            
+            // Notify client about disconnection
+            json_t *status = json_object();
+            json_object_set_new(status, "type", json_string("connection-state"));
+            json_object_set_new(status, "status", json_string("disconnected"));
+            json_object_set_new(status, "reason", json_string("Server connection lost"));
+            
+            char *status_str = json_dumps(status, JSON_COMPACT);
+            if (status_str) {
+                forward_to_websocket(client, (unsigned char *)status_str, strlen(status_str));
+                free(status_str);
+            }
+            json_decref(status);
+            
             break;
         }
         
@@ -493,12 +540,9 @@ static void *mumble_receive_thread(void *arg) {
     
     debug_log("Mumble receive thread ending for user %s", client->username);
     
-    if (client->authenticated) {
-        client->authenticated = 0;
-        lws_callback_on_writable(client->wsi);
-    }
-    
-    pthread_exit(NULL);
+    // Clean up connection
+    cleanup_client(client);
+    return NULL;
 }
 
 // Handle incoming WebSocket messages
@@ -614,20 +658,45 @@ static void forward_to_websocket(struct client_session *client, const unsigned c
 
 // Clean up client resources
 static void cleanup_client(struct client_session *client) {
+    if (!client) return;
+    
+    debug_log("Cleaning up client resources");
+    
+    // Mark as not authenticated first to stop receive thread
+    client->authenticated = 0;
+    
     if (client->ssl) {
+        debug_log("Shutting down SSL connection");
         SSL_shutdown(client->ssl);
         SSL_free(client->ssl);
         client->ssl = NULL;
     }
+    
     if (client->mumble_fd >= 0) {
+        debug_log("Closing socket");
         close(client->mumble_fd);
         client->mumble_fd = -1;
     }
+    
     if (client->server_host) {
+        debug_log("Freeing server host");
         free(client->server_host);
         client->server_host = NULL;
     }
-    client->authenticated = 0;
+    
+    // Notify client about cleanup
+    json_t *status = json_object();
+    json_object_set_new(status, "type", json_string("connection-state"));
+    json_object_set_new(status, "status", json_string("cleanup-complete"));
+    
+    char *status_str = json_dumps(status, JSON_COMPACT);
+    if (status_str && client->wsi) {
+        forward_to_websocket(client, (unsigned char *)status_str, strlen(status_str));
+        free(status_str);
+    }
+    json_decref(status);
+    
+    debug_log("Client cleanup complete");
 }
 
 // Signal handler for graceful shutdown

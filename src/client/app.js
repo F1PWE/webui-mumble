@@ -23,6 +23,11 @@ class MumbleClient {
         this.usernameInput = document.getElementById('username');
         this.statusElement = document.getElementById('connection-status');
 
+        this.reconnectTimer = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 5000; // 5 seconds
+
         this.bindEvents();
     }
 
@@ -153,27 +158,49 @@ class MumbleClient {
         switch (data.type) {
             case 'connection-state':
                 console.log('Connection state update:', data.status);
-                if (data.status === 'authenticated') {
-                    this.updateStatus('Connected as ' + data.username);
-                    this.isConnected = true;
-                    this.updateButtons();
-                } else if (data.status === 'version-received') {
-                    this.updateStatus('Server version received, authenticating...');
+                switch (data.status) {
+                    case 'authenticated':
+                        this.updateStatus('Connected as ' + data.username);
+                        this.isConnected = true;
+                        this.reconnectAttempts = 0;
+                        this.updateButtons();
+                        break;
+                        
+                    case 'version-received':
+                        this.updateStatus('Server version received, authenticating...');
+                        break;
+                        
+                    case 'disconnected':
+                        this.updateStatus('Disconnected: ' + (data.reason || 'Unknown reason'));
+                        this.isConnected = false;
+                        this.updateButtons();
+                        this.handleDisconnect();
+                        break;
+                        
+                    case 'cleanup-complete':
+                        console.log('Server cleanup complete');
+                        break;
+                        
+                    default:
+                        this.updateStatus('Connection state: ' + data.status);
                 }
                 break;
-            
+                
             case 'mumble-data':
                 console.log('Received Mumble data, type:', data.messageType);
-                // Handle binary data in base64 format
-                const binaryData = atob(data.data);
-                this.handleMumbleData(data.messageType, binaryData);
+                try {
+                    const binaryData = atob(data.data);
+                    this.handleMumbleData(data.messageType, binaryData);
+                } catch (error) {
+                    console.error('Error processing Mumble data:', error);
+                }
                 break;
-            
+                
             case 'error':
                 console.error('Server error:', data.message);
                 this.updateStatus('Error: ' + data.message);
                 break;
-            
+                
             default:
                 console.log('Unknown message type:', data.type);
         }
@@ -233,17 +260,25 @@ class MumbleClient {
     }
 
     disconnect() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        
         if (this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
         }
+        
         if (this.peerConnection) {
             this.peerConnection.close();
         }
+        
         if (this.connection) {
             this.connection.close();
         }
-
+        
         this.isConnected = false;
+        this.reconnectAttempts = 0;
         this.updateStatus('Disconnected');
         this.updateButtons();
     }
@@ -337,6 +372,20 @@ class MumbleClient {
                 <span class="user-count">${channel.users} users</span>
             </div>
         `).join('');
+    }
+
+    handleDisconnect() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+        }
+        
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            this.updateStatus(`Connection lost, retrying in ${this.reconnectDelay/1000}s... (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+            this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
+        } else {
+            this.updateStatus('Connection failed after multiple attempts. Please try again later.');
+        }
     }
 }
 
